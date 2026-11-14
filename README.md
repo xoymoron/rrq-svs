@@ -423,3 +423,25 @@ checked target maps and suffix-only loss for all three arms.
 Runtime smoke losses and decoder outputs only establish that the path works.
 Neither token coverage nor a few embedding updates establish multilingual quality,
 RRQ improvement, unseen-singer performance, or an acceptable paper result.
+
+Multilingual server integration observed on 2026-11-15:
+
+| Check | Observed outcome |
+|---|---|
+| Final checks | 71 tests on local CPU and server CUDA environment; `pip check` and all pinned asset hashes passed |
+| Dataset export / native codec cache | All 1,280 phrases; no vocabulary rejection |
+| Primary adaptation | 472 distinct train phrases, one pass, all 8 non-Chinese languages |
+| Original embedding rows | Bitwise unchanged after every optimizer step |
+| Language smoke | 32 updates on 8 training phrases; separate valid phrases in all 8 languages |
+| Actual autoregressive generation | 8 complete training phrases, native 24 kHz decoder, no target acoustic tokens |
+| RRQ cache production | Those 8 real rollouts, four-arm diagnostic, clean-prefix identity passed, codec unchanged |
+| RRQ cache consumption | 8 suffix-loss updates, `arm=rrq`, `rho=1`, all 8 languages |
+
+The 472-phrase run is `artifacts/multilingual-epoch1/`. The generation/diagnostic
+smoke deliberately uses the separate 32-step adapter in `artifacts/multilingual-smoke/`;
+it is **not** an evaluation of the 472-phrase adapter. The RRQ consumption smoke
+also starts from the reproducible initial model, not a continued warmup checkpoint.
+Its purpose is to verify the training path, not compare training strategies.
+The validation CE entries in reports are runtime checks, not perceptual results.
+Logs are in `~/SVS/logs/multilingual-*.log`. The existing `svs-rrq` tmux session
+retains `multilingual-data`, `multilingual-train` and `multilingual-full` windows.
