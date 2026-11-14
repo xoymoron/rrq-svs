@@ -84,6 +84,20 @@ def model_phone(phone, language):
     return phone[:-3] if language=='Chinese' and phone.endswith('_zh') else phone
 
 
+def validate_annotations(row):
+    n=len(row['phones'])
+    fields=dict(row.get('score') or {})
+    fields.update(row.get('techniques') or {})
+    for key,values in fields.items():
+        if not isinstance(values,list) or len(values)!=n:
+            raise ValueError(f'annotation length mismatch: {key}')
+        values=np.asarray(values,dtype=float)
+        if not np.isfinite(values).all(): raise ValueError(f'nonfinite annotation: {key}')
+        if key.endswith('_tech') and not np.isin(values,[0,1]).all():
+            raise ValueError(f'technique annotation must be binary: {key}')
+        if (values<0).any(): raise ValueError(f'negative annotation: {key}')
+
+
 def frame_phones(phones, durations, frames, audio_seconds, tolerance=.04):
     d=np.asarray(durations,dtype=float)
     if (len(d)!=len(phones) or not len(d) or not np.isfinite(d).all()

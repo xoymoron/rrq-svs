@@ -14,7 +14,7 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
 
-from .corpora import gtsinger_row, m4singer_row, select_rows, frame_phones, model_phone
+from .corpora import gtsinger_row, m4singer_row, select_rows, frame_phones, model_phone, validate_annotations
 from .data_download import download, RangeReader, extract_member, safe_relative, free_space
 from .io import sha256, write_json
 
@@ -69,7 +69,8 @@ def fetch_gtsinger(root,per_singer,languages):
 def fetch_m4singer(root,per_singer):
     root=Path(root); root.mkdir(parents=True,exist_ok=True)
     download('https://raw.githubusercontent.com/M4Singer/M4Singer/master/dataset_license.md',root/'dataset_license.md',max_bytes=100000)
-    with RangeReader(M4_URL,max_bytes=2*1024**3) as source, zipfile.ZipFile(source) as archive:
+    # Aggregate cap: metadata 128 MiB + 4 workers * 448 MiB = 1920 MiB.
+    with RangeReader(M4_URL,max_bytes=128*1024**2) as source, zipfile.ZipFile(source) as archive:
         names=archive.namelist()
         metadata=[p for p in names if p.endswith('/meta.json') or p=='meta.json']
         if len(metadata)!=1: raise ValueError('expected one M4Singer meta.json')
@@ -86,12 +87,13 @@ def fetch_m4singer(root,per_singer):
             base=str(Path(relative).with_suffix('')).replace('\\','/')
             for ext in ('.TextGrid','.json','.mid','.txt'):
                 if base+ext in name_set: members.append(base+ext)
-        if sum(archive.getinfo(n).file_size for n in members)>1024**3:
+        subset_size=sum(archive.getinfo(n).file_size for n in members)+meta.stat().st_size
+        if subset_size>1024**3:
             raise ValueError('selected uncompressed M4 subset exceeds 1 GiB pilot cap')
         free_space(root,sum(archive.getinfo(n).file_size for n in members))
         expected_size=source.size
         def get_chunk(chunk):
-            with RangeReader(M4_URL,max_bytes=512*1024**2) as reader, zipfile.ZipFile(reader) as subset:
+            with RangeReader(M4_URL,max_bytes=448*1024**2) as reader, zipfile.ZipFile(reader) as subset:
                 if reader.size!=expected_size: raise ValueError('archive changed during download')
                 for i,name in enumerate(chunk):
                     extract_member(subset,name,root/'raw',max_bytes=16*1024**2)
@@ -113,6 +115,7 @@ def harvest(audio,sr):
 
 
 def process_row(row,raw,out,vocabulary,f0_function=harvest):
+    validate_annotations(row)
     source=Path(raw)/safe_relative(row['source_audio'])
     audio,sr=sf.read(source,dtype='float64',always_2d=True)
     if audio.shape[1]!=1: raise ValueError('expected mono; no implicit downmix')

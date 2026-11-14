@@ -104,3 +104,54 @@ def test_voiceless_and_large_f0_mismatch_are_not_exported(tmp_path):
     out=tmp_path/'out'; out.mkdir()
     with pytest.raises(ValueError,match='silent'):
         process_row(row,tmp_path,out,{'a'},f0_function=lambda x,sr:np.zeros(15))
+
+
+def test_annotation_axes_must_match_phonemes():
+    row=c.gtsinger_row(dict(item_name='English#EN-Alto-1#Breathy#Song#Control_Group#0000',
+        ph=['a','b'],ph_durs=[.1,.2],wav_fn='x.wav',mix_tech=[1]))
+    with pytest.raises(ValueError,match='annotation length'): c.validate_annotations(row)
+    row['techniques']={'mix_tech':[1,2]}
+    with pytest.raises(ValueError,match='binary'): c.validate_annotations(row)
+    row['techniques']=None; row['score']={'ep_notedurs':[.3]}
+    with pytest.raises(ValueError,match='annotation length'): c.validate_annotations(row)
+
+
+def test_raw_f0_is_retained_but_unvoiced_rows_are_not_exported(tmp_path):
+    import soundfile as sf
+    from rrq.prepare_data import process_row
+    sf.write(tmp_path/'x.wav',np.ones(4800)*.1,16000)
+    row=c.m4singer_row(dict(item_name='Tenor-1#Song#0001',phs=['a'],ph_dur=[.3]))
+    row['source_audio']='x.wav'; out=tmp_path/'out'; out.mkdir()
+    result=process_row(row,tmp_path,out,{'a'},f0_function=lambda x,sr:np.zeros(15))
+    assert not result['prompt_singer_eligible']
+    assert result['f0_avg']==0
+    with pytest.raises(ValueError,match='clock mismatch'):
+        process_row(row,tmp_path,out,{'a'},f0_function=lambda x,sr:np.zeros(30))
+
+
+def test_m4_fetch_total_transfer_caps_and_metadata_size(monkeypatch,tmp_path):
+    import json,zipfile
+    import rrq.prepare_data as p
+    payload=io.BytesIO()
+    with zipfile.ZipFile(payload,'w') as archive:
+        archive.writestr('m4singer/meta.json',json.dumps([dict(item_name='Tenor-1#song#0000',
+            phs=['a'],ph_dur=[1.])]))
+        archive.writestr('m4singer/Tenor-1#song/0000.wav',b'fake-audio')
+    limits=[]
+    class Reader(io.BytesIO):
+        def __init__(self,url,max_bytes):
+            super().__init__(payload.getvalue()); limits.append(max_bytes)
+            self.size=len(payload.getvalue()); self.transferred=100
+    monkeypatch.setattr(p,'RangeReader',Reader)
+    monkeypatch.setattr(p,'download',lambda *a,**kw:None)
+    p.fetch_m4singer(tmp_path/'good',1)
+    assert len(limits)==5
+    assert sum(limits)<=2*1024**3
+    original=p.zipfile.ZipFile.getinfo
+    def oversized(self,name):
+        info=original(self,name)
+        if name.endswith('.wav'): info.file_size=1024**3-1
+        return info
+    monkeypatch.setattr(p.zipfile.ZipFile,'getinfo',oversized)
+    with pytest.raises(ValueError,match='uncompressed'):
+        p.fetch_m4singer(tmp_path/'bad',1)

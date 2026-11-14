@@ -247,3 +247,78 @@ After a real diagnostic, merge `rrq_examples/training-overlay.yaml` into the ori
 - Unit/adapter tests and real pretrained codec/vocoder smoke were run locally. **Full Fairseq/T5 generator inference and SVS fine-tuning were not run in this implementation environment.** Python/PyTorch compatibility of that separate full upstream stack remains to be validated.
 
 Code map: `rrq/core.py` native requantization; `rrq/io.py` strict import/manifest; `rrq/pipeline.py` four-arm experiment; `rrq/metrics.py` diagnostics; `rrq/training.py` cached training hook; `rrq/cli.py` commands. Research decisions and review history remain in the parent `SVS_RESEARCH_RECORD.md`.
+
+### Linux deployment and corpus preparation
+
+The deployment layout is `~/SVS/{rrq-svs,.venv,data,logs}`. The repository branch is
+`rrq-mechanism`; only code goes to Git. Model weights, recordings and generated
+features stay on the server. Existing tmux sessions are left alone.
+
+```bash
+cd ~/SVS
+git clone --branch rrq-mechanism https://github.com/xoymoron/rrq-svs.git rrq-svs
+python3.10 -m venv .venv
+.venv/bin/python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+.venv/bin/python -m pip install -r rrq-svs/requirements-data.txt
+tmux new-session -s svs-rrq -c ~/SVS/rrq-svs
+# Inside tmux:
+cd ~/SVS/rrq-svs
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+../.venv/bin/python -m rrq.prepare_data fetch --corpus gtsinger --root ../data/gtsinger-pilot --per-singer 32
+../.venv/bin/python -m rrq.prepare_data fetch --corpus m4singer --root ../data/m4singer-pilot --per-singer 32
+../.venv/bin/python -m rrq.prepare_data preprocess --root ../data/gtsinger-pilot --output ../data/gtsinger-processed --workers 4
+../.venv/bin/python -m rrq.prepare_data preprocess --root ../data/m4singer-pilot --output ../data/m4singer-processed --workers 4
+```
+
+Use `git pull --ff-only` in an existing clean checkout. Reattach with
+`tmux attach -t svs-rrq`. Each preprocessing output must be a new directory;
+downloads can resume from verified files. `pyworld` needs Python development
+headers and a C++ compiler. If system headers are unavailable, the deployment
+uses project-local Python 3.10 headers via compiler `CPATH`; no global packages
+or other experiments are changed. The CUDA wheel must match the GPU driver.
+
+| Corpus | Source and retained annotation | Preparation policy |
+|---|---|---|
+| GTSinger | [NeurIPS 2024 paper](https://arxiv.org/abs/2409.13832), [official data](https://huggingface.co/datasets/GTSinger/GTSinger), pinned revision `4426c862beed558b7e1cb8a4dce7e8c0c83bb208` | All nine languages represented in a bounded pilot; preserve phonemes, duration, six technique arrays when present, global styles, per-take JSON/TextGrid/MusicXML. Paired speech is excluded. |
+| M4Singer | [NeurIPS 2022 paper](https://openreview.net/forum?id=qiDmAaG6mP), [official repository/download](https://github.com/M4Singer/M4Singer) | Read only selected members from the official ZIP using HTTP Range, with CRC checks. Preserve notes, note durations, slur and phoneme durations; missing technique labels remain null. |
+
+Both datasets are CC BY-NC-SA 4.0, with the authors' additional terms retained in
+downloaded license files. Cite the original datasets; this repository does not
+redistribute them. Other previously considered corpora are **not claimed loaded**:
+OpenSinger needs verified external alignments for this recipe; AIHub corpora need
+account/access arrangements; SingStyle111 needs source access confirmation; the
+single-singer corpora (Opencpop, CSD, Kiritan, KiSing original, PJS, Namine Ritsu,
+Oniku Kurumi, Ofuton-P) do not increase multi-singer coverage. jaCappella ensemble
+recordings need a different isolated-vocal/annotation contract. They are deferred,
+not automatically mixed into the two supported adapters.
+
+Outputs: `manifest.jsonl`, per-item 24 kHz float WAV and feature NPZ, split TSVs,
+`rejected.jsonl`, `report.json`. The manifest preserves source IDs/paths/hashes,
+native phonemes, original score fields and units. Audio is resampled without
+normalization, trimming or time stretching. Mono and 0.2–13 second limits are
+enforced. Phonemes use cumulative boundaries on the 50 Hz frame clock; endpoint
+duration mismatch above 40 ms is rejected and smaller differences are reported.
+WORLD Harvest follows upstream's 20 ms hop; only its optional endpoint frame is
+removed. Raw F0 is retained alongside the original mean-222 discrete encoding.
+
+**Compatibility and experiment boundaries:**
+
+- Public Prompt-Singer has a Mandarin phoneme vocabulary. Foreign phones are
+  retained as-is in the common manifest and excluded from TSV export, never
+  mapped to UNK or deceptively stripped of language suffixes. Only Chinese `_zh`
+  suffixes and explicit silence/breath aliases are normalized.
+- TSVs use a fixed neutral prompt and `volume=None`; gender and range attributes
+  are not guessed. All arms must use the same prompt/conditioning. Target F0 and
+  durations make this **annotation-conditioned**, not score-only SVS.
+- Selection is deterministic and song-diverse, capped per singer. The provisional
+  80/10/10 hash split groups normalized song titles across singers and technique
+  takes. It is not a verified composition split, official benchmark split or
+  held-out-singer experiment. Translation aliases require further review.
+- M4Singer was used in Prompt-Singer training. These pilots cannot establish
+  unseen-corpus or unseen-singer generalization. Raw corpus capacity, exported
+  compatible samples and successful RRQ model training are separate quantities.
+- M4 ZIP access refuses HTTP 200 fallback, limits each worker's range transfer,
+  caps selected uncompressed members at 1 GiB and preserves 12 GiB free disk.
+  GTSinger file downloads have individual size caps and the same disk reserve.
+- Prepared TSVs still need real generator rollouts and RRQ target caches before
+  cached-target training; preprocessing does not manufacture predictions.
