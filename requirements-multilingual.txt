@@ -1,0 +1,4 @@
+-r requirements-rrq.txt
+transformers==4.44.2
+sentencepiece>=0.2,<0.3
+protobuf>=4
