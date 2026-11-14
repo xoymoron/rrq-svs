@@ -322,3 +322,17 @@ removed. Raw F0 is retained alongside the original mean-222 discrete encoding.
   GTSinger file downloads have individual size caps and the same disk reserve.
 - Prepared TSVs still need real generator rollouts and RRQ target caches before
   cached-target training; preprocessing does not manufacture predictions.
+
+Deployment validation (2026-11-15, Python 3.10 / PyTorch 2.6.0+cu124 / RTX 3090):
+62 tests passed, `pip check` passed, and the pretrained codec/decoder CUDA smoke
+completed. Both 32-per-singer pilots produced 640 validated phrases with no
+preprocessing rejections: GTSinger 1.724 hours, M4Singer 0.923 hours. Compatible
+TSVs contain 64 Mandarin GTSinger phrases and 638 M4Singer phrases; the remaining
+576 GTSinger phrases have unsupported foreign phonemes, and two M4Singer phrases
+have rescaled F0 outside the original token range. Neither was silently clipped
+or mapped to UNK. All 1,280 source/output hashes and feature lengths were checked.
+One representative per corpus-specific singer ID (40 total, not a claim of 40
+distinct people) passed the actual CUDA codec clock and native RRQ clean-prefix
+identity checks. The official GTSinger release mixes `.TextGrid` and `_TextGrid`
+filenames; the downloader preserves and records the resolved original name.
+These are deployment/data checks, **not SVS quality or zero-shot results**.
