@@ -168,3 +168,26 @@ def test_m4_fetch_total_transfer_caps_and_metadata_size(monkeypatch,tmp_path):
     monkeypatch.setattr(p.zipfile.ZipFile,'getinfo',oversized)
     with pytest.raises(ValueError,match='uncompressed'):
         p.fetch_m4singer(tmp_path/'bad',1)
+
+
+def test_gtsinger_verified_alternate_textgrid_name(monkeypatch,tmp_path):
+    import urllib.error
+    import rrq.prepare_data as p
+    calls=[]
+    def fetch(url,destination,**kwargs):
+        calls.append((url,str(destination)))
+        if url.endswith('.TextGrid'): raise urllib.error.HTTPError(url,404,'missing',{},None)
+        return destination
+    monkeypatch.setattr(p,'download',fetch)
+    actual=p.download_gts_file('French/song/0000.TextGrid',tmp_path)
+    assert actual=='French/song/0000_TextGrid'
+    assert calls[-1][0].endswith('/French/song/0000_TextGrid')
+    assert calls[-1][1].endswith('0000_TextGrid')
+
+
+def test_gtsinger_never_substitutes_audio_after_404(monkeypatch,tmp_path):
+    import urllib.error
+    import rrq.prepare_data as p
+    def fetch(url,*args,**kwargs): raise urllib.error.HTTPError(url,404,'missing',{},None)
+    monkeypatch.setattr(p,'download',fetch)
+    with pytest.raises(urllib.error.HTTPError): p.download_gts_file('English/0000.wav',tmp_path)

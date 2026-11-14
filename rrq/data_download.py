@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path, PurePosixPath
 
 
@@ -107,6 +108,9 @@ def download(url,path,max_bytes=128*1024**2):
             checksum=sha256(part); part.replace(path)
             write_json(side,dict(url=url,bytes=count,sha256=checksum))
             return path
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (408,429,500,502,503,504) or attempt==3: raise
+            time.sleep(2**attempt)
         except (OSError,TimeoutError):
             if attempt==3: raise
             time.sleep(2**attempt)

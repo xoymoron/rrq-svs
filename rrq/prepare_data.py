@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import subprocess
 import urllib.parse
+import urllib.error
 import zipfile
 
 import numpy as np
@@ -27,6 +28,21 @@ LANGUAGES=['Chinese','English','French','German','Italian','Japanese','Korean','
 def jsonl(path,rows):
     with Path(path).open('w',encoding='utf-8') as f:
         for row in rows: f.write(json.dumps(row,ensure_ascii=False,allow_nan=False)+'\n')
+
+
+def download_gts_file(rel,root):
+    safe_relative(rel)
+    alternate=rel.removesuffix('.TextGrid')+'_TextGrid' if rel.endswith('.TextGrid') else None
+    if alternate and (Path(root)/'raw'/alternate).exists(): rel=alternate
+    try:
+        download(GT_BASE+urllib.parse.quote(rel,safe='/'),Path(root)/'raw'/rel,max_bytes=16*1024**2)
+        return rel
+    except urllib.error.HTTPError as exc:
+        if exc.code!=404 or alternate is None: raise
+        # Verified official naming variation in English/French/Italian. Preserve
+        # actual names and source URL rather than inventing missing annotations.
+        download(GT_BASE+urllib.parse.quote(alternate,safe='/'),Path(root)/'raw'/alternate,max_bytes=16*1024**2)
+        return alternate
 
 
 def fetch_gtsinger(root,per_singer,languages):
@@ -50,17 +66,18 @@ def fetch_gtsinger(root,per_singer,languages):
         files.extend(base+ext for ext in ('.wav','.json','.TextGrid','.musicxml'))
     def get(rel):
         try:
-            download(GT_BASE+urllib.parse.quote(rel,safe='/'),root/'raw'/rel,max_bytes=16*1024**2)
-            return None
+            actual=download_gts_file(rel,root)
+            return dict(path=rel,resolved_path=actual) if actual!=rel else None
         except Exception as exc: return dict(path=rel,error=str(exc))
-    failures=[]
+    failures=[]; alternatives=[]
     with ThreadPoolExecutor(max_workers=4) as pool:
         for i,result in enumerate(pool.map(get,files)):
-            if result: failures.append(result)
+            if result:
+                (failures if 'error' in result else alternatives).append(result)
             if i%100==0: print(f'gtsinger files {i+1}/{len(files)}',flush=True)
     jsonl(root/'selected.jsonl',chosen)
     write_json(root/'download-report.json',dict(corpus='gtsinger',revision=GT_REV,
-        per_singer=per_singer,source_items=counts,selected=len(chosen),failures=failures,
+        per_singer=per_singer,source_items=counts,selected=len(chosen),failures=failures,alternate_filenames=alternatives,
         subset='deterministic song-diverse pilot, not full corpus',license='CC-BY-NC-SA-4.0',
         citation='https://arxiv.org/abs/2409.13832'))
     if failures: raise RuntimeError(f'{len(failures)} downloads failed; rerun to resume')
