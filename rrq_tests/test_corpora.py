@@ -72,3 +72,35 @@ def test_range_reader_never_accepts_full_body_or_exceeds_budget():
     def ignored(req,timeout):
         r=Response(source,0,9,10); r.status=200; return r
     with pytest.raises(ValueError,match='206'): RangeReader('https://example.test/x',opener=ignored)
+
+
+def test_preprocess_preserves_clock_and_rejects_unknown_export(tmp_path):
+    import soundfile as sf
+    from rrq.prepare_data import process_row
+    raw=tmp_path/'raw'; raw.mkdir()
+    sf.write(raw/'x.wav',.1*np.sin(2*np.pi*220*np.arange(4800)/16000),16000,subtype='FLOAT')
+    row=c.gtsinger_row(dict(item_name='English#EN-Alto-1#Breathy#Song#Control_Group#0000',
+        ph=['AH0_en'],ph_durs=[.3],wav_fn='x.wav'))
+    out=tmp_path/'processed'; out.mkdir()
+    result=process_row(row,raw,out,{'SP','AP','a'},f0_function=lambda x,sr:np.full(16,220.))
+    assert result['n_frames']==15
+    assert result['prompt_singer_eligible'] is False
+    assert result['unknown_phones']==['AH0_en']
+    assert result['conditioning']=='annotation_conditioned'
+    assert result['techniques'] is None
+    assert result['f0_extra_endpoint_frames']==1
+    assert sf.info(result['audio']).samplerate==24000
+    arrays=np.load(result['features'])
+    assert len(arrays['f0_hz'])==15
+    assert result['phone_duration_error_seconds']==pytest.approx(0)
+
+
+def test_voiceless_and_large_f0_mismatch_are_not_exported(tmp_path):
+    import soundfile as sf
+    from rrq.prepare_data import process_row
+    sf.write(tmp_path/'x.wav',np.zeros(4800),16000)
+    row=c.m4singer_row(dict(item_name='Tenor-1#Song#0001',phs=['a'],ph_dur=[.3]))
+    row['source_audio']='x.wav'
+    out=tmp_path/'out'; out.mkdir()
+    with pytest.raises(ValueError,match='silent'):
+        process_row(row,tmp_path,out,{'a'},f0_function=lambda x,sr:np.zeros(15))

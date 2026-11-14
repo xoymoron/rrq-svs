@@ -1,0 +1,4 @@
+-r requirements-rrq.txt
+# Upstream Prompt-Singer uses WORLD Harvest. Building pyworld on Linux needs
+# matching Python headers and a C++ compiler; see README deployment notes.
+pyworld==0.3.5
