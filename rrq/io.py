@@ -30,24 +30,32 @@ def validate_codes(codes):
 def safe_id(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value):
         raise ValueError('sample id must use ASCII letters, digits, dot, hyphen or underscore')
+    if value.endswith('.'):
+        raise ValueError('trailing dots are not portable Windows filenames')
     # Windows reserved filenames must not become paths.
     if value.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL', *('COM'+str(i) for i in range(1, 10)), *('LPT'+str(i) for i in range(1, 10))}:
         raise ValueError('reserved sample id')
     return value
 
 
+def unique_id(value,seen):
+    item = safe_id(value)
+    if item.casefold() in seen:
+        raise ValueError('duplicate/case-colliding sample id: ' + item)
+    seen.add(item.casefold())
+    return item
+
+
 def parse_generation(text):
     """Read upstream D-ID<TAB>sequence; reject partial triplets and wrong offsets."""
-    result = {}
+    result, seen = {}, set()
     for line in text.splitlines():
         if not line.startswith('D-'):
             continue
         fields = line.split('\t')
         if len(fields) != 2:
             raise ValueError('expected upstream two-column D- generation format')
-        item = safe_id(fields[0][2:])
-        if item in result:
-            raise ValueError('duplicate generated sample id: ' + item)
+        item = unique_id(fields[0][2:],seen)
         tokens = fields[1].split()
         starts = [i for i, t in enumerate(tokens) if t == '<acoustic_start>']
         if not starts:
@@ -84,10 +92,7 @@ def load_manifest(path):
         required = {'id', 'singer', 'audio', 'prediction', 'origin', 'alignment', 'gain', 'conditioning'}
         if not required <= row.keys():
             raise ValueError('manifest requires ' + ', '.join(sorted(required)))
-        item = safe_id(row['id'])
-        if item in ids:
-            raise ValueError('duplicate manifest id: ' + item)
-        ids.add(item)
+        unique_id(row['id'],ids)
         if not isinstance(row['singer'], str) or not row['singer'].strip():
             raise ValueError('singer id must be nonempty')
         if row['origin'] not in {'model_rollout', 'synthetic_smoke'}:

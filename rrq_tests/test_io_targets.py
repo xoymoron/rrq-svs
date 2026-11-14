@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from rrq.io import parse_generation, validate_codes, load_manifest
+from rrq.io import parse_generation, validate_codes, load_manifest, safe_id
 from rrq.targets import training_map
 
 
@@ -48,3 +48,9 @@ def test_manifest_requires_origin_and_alignment_attestation(tmp_path):
     p = tmp_path / 'manifest.jsonl'
     p.write_text('{"id":"x","singer":"s","audio":"x.wav","prediction":"x.npz"}\n')
     with pytest.raises(ValueError): load_manifest(p)
+
+
+def test_windows_filename_collisions_are_rejected_before_export():
+    with pytest.raises(ValueError): safe_id('sample.')
+    line='\t<acoustic_start> aco_0 aco_1024 aco_2048 <acoustic_end>'
+    with pytest.raises(ValueError): parse_generation('D-clip'+line+'\nD-CLIP'+line)

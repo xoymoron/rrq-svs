@@ -18,6 +18,14 @@ def pitch_track(x, sr):
         ac /= max(ac[0], 1e-12)
         segment = ac[low:high+1]
         peaks, _ = find_peaks(segment)
+        # scipy excludes endpoints. Retain one-sided boundary peaks so the
+        # declared 60/1500 Hz limits do not become unvoiced or octave errors.
+        endpoints = []
+        # The lower lag must also beat its LEFT neighbor, otherwise the
+        # autocorrelation's zero-lag lobe is mistaken for a 1500 Hz period.
+        if ac[low] >= ac[low-1] and segment[0] >= segment[1]: endpoints.append(0)
+        if segment[-1] >= segment[-2]: endpoints.append(len(segment)-1)
+        peaks = np.sort(np.concatenate((peaks,np.array(endpoints,dtype=int))))
         if rms < 1e-4 or not len(peaks):
             f0.append(0.); voiced.append(False); continue
         strength = segment[peaks]
@@ -29,6 +37,7 @@ def pitch_track(x, sr):
         denom = ac[j-1] - 2*ac[j] + ac[j+1]
         if abs(denom) > 1e-12:
             lag += float(np.clip(.5*(ac[j-1]-ac[j+1])/denom, -.5, .5))
+        lag = float(np.clip(lag,low,high))
         f0.append(sr/lag); voiced.append(True)
     return np.array(f0), np.array(voiced)
 
