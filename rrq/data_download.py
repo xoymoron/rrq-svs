@@ -27,6 +27,7 @@ class RangeReader(io.RawIOBase):
     def __init__(self,url,max_bytes=2*1024**3,opener=urllib.request.urlopen):
         self.url,self.max_bytes,self.opener=url,max_bytes,opener
         self.pos,self.transferred,self.size=0,0,None
+        self.window_start,self.window=0,b''
         self._fetch(0,0)
 
     def readable(self): return True
@@ -63,11 +64,21 @@ class RangeReader(io.RawIOBase):
 
     def read(self,n=-1):
         n=max(0,self.size-self.pos) if n is None or n<0 else min(n,max(0,self.size-self.pos))
+        offset=self.pos-self.window_start
+        if 0<=offset and offset+n<=len(self.window):
+            data=self.window[offset:offset+n]; self.pos+=n
+            return data
         parts=[]
         while n:
             count=min(n,4*1024**2)
             parts.append(self._fetch(self.pos,self.pos+count-1)); self.pos+=count; n-=count
         return b''.join(parts)
+
+    def prefetch(self,start,length):
+        if length>32*1024**2: raise ValueError('prefetch exceeds memory cap')
+        position=self.pos
+        self.seek(start); data=self.read(length); self.seek(position)
+        self.window_start,self.window=start,data
 
 
 def download(url,path,max_bytes=128*1024**2):
@@ -113,6 +124,13 @@ def extract_member(archive,name,root,max_bytes=128*1024**2):
         if path.stat().st_size==info.file_size and zlib.crc32(path.read_bytes())==info.CRC: return path
         raise ValueError('existing ZIP member checksum mismatch')
     part=path.with_name(path.name+'.part')
+    if isinstance(archive.fp,RangeReader):
+        # A ZIP member otherwise needs separate remote header/name/payload reads.
+        # Extra 4KiB covers differing local header extras; overflow still falls
+        # back to strict, budget-accounted Range reads.
+        length=min(archive.fp.size-info.header_offset,
+                   30+len(info.filename.encode('utf-8'))+len(info.extra)+info.compress_size+4096)
+        archive.fp.prefetch(info.header_offset,length)
     with archive.open(info) as source, part.open('wb') as target:
         shutil.copyfileobj(source,target,1024**2) # ZipFile enforces CRC and declared length.
     if part.stat().st_size!=info.file_size: raise ValueError('ZIP extracted size mismatch')

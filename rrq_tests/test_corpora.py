@@ -74,6 +74,19 @@ def test_range_reader_never_accepts_full_body_or_exceeds_budget():
     with pytest.raises(ValueError,match='206'): RangeReader('https://example.test/x',opener=ignored)
 
 
+def test_zip_prefetch_serves_header_and_payload_without_extra_requests():
+    source=b'0123456789'; calls=[]
+    def opener(req,timeout):
+        start,end=map(int,req.get_header('Range').removeprefix('bytes=').split('-'))
+        calls.append((start,end))
+        return Response(source[start:end+1],start,end,len(source))
+    f=RangeReader('https://example.test/data.zip',max_bytes=16,opener=opener)
+    f.prefetch(2,7)
+    f.seek(2); assert f.read(2)==b'23'
+    f.seek(5); assert f.read(4)==b'5678'
+    assert calls==[(0,0),(2,8)]
+
+
 def test_preprocess_preserves_clock_and_rejects_unknown_export(tmp_path):
     import soundfile as sf
     from rrq.prepare_data import process_row
