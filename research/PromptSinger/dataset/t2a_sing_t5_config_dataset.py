@@ -308,13 +308,23 @@ class T2ASingT5Dataset(FairseqDataset):
             return r
         
         self.is_generate = is_generate
+        self.rrq_targets = None
+        if cfg.config.get('rrq') and not is_generate:
+            from rrq.training import CachedTargets
+            rrq_config = dict(cfg.config['rrq'])
+            rrq_config['cache_dir'] = str(Path(cfg.root) / rrq_config['cache_dir'])
+            self.rrq_targets = CachedTargets(rrq_config)
+            if num_coarse_quantizers != 3:
+                raise ValueError('RRQ adapter requires three acoustic codebooks')
+            if any(s.get('volume') != 'None' or not s.get('prompt') for s in samples):
+                raise ValueError('RRQ requires fixed prompt text and volume=None in every sample')
 
         try:
             self.stage1_dict = load_variable(os.path.join(self.cfg.root, self.cfg.word_dict))
             self.stage2_dict = load_variable(os.path.join(self.cfg.root, self.cfg.sentence_dict))
         except FileNotFoundError:
             print('WARNING: Failed to load files of keywords and sentence templates. Only supports executing inference.')
-            assert self.is_generate
+            assert self.is_generate or self.rrq_targets is not None
 
         self.volume_type = {
             'low': [0.02, 0.04],
@@ -323,7 +333,7 @@ class T2ASingT5Dataset(FairseqDataset):
         }
         
         self.text_encoder = FrozenT5Embedder(version=self.cfg.text_encoder_version)
-        self.audio_tokenizer = AudioTokenizer(ckpt_path=self.cfg.audio_tokenizer_ckpt_path, device=torch.device('cuda'))
+        self.audio_tokenizer = None if self.rrq_targets is not None else AudioTokenizer(ckpt_path=self.cfg.audio_tokenizer_ckpt_path, device=torch.device('cuda'))
         
         logger.info(self.__repr__())
 
@@ -476,7 +486,9 @@ class T2ASingT5Dataset(FairseqDataset):
             def audio_rms(wav: torch.Tensor):
                 return torch.sqrt(torch.mean(torch.square(wav), axis=-1)).item()
             
-            if not self.is_generate:
+            if self.rrq_targets is not None:
+                wav = None  # The cache already encodes the hash-verified unscaled target.
+            elif not self.is_generate:
                 wav, sr = torchaudio.load(sample['audio_path'])
                 if sr != self.audio_tokenizer.sr:
                     wav = torchaudio.transforms.Resample(sr, self.audio_tokenizer.sr)(wav)
@@ -502,16 +514,17 @@ class T2ASingT5Dataset(FairseqDataset):
             
             sample_encoded['prompt'] = self.text_encoder.encode(overall_text_prompt).squeeze(0)
 
-            original_rms = audio_rms(wav)
-            
-            if volume_label != 'None':
-                rms_rescaled = random.uniform(self.volume_type[volume_label][0], self.volume_type[volume_label][1])
-                wav_rescaled = wav / original_rms * rms_rescaled
-                wav_rescaled = torch.clamp(wav_rescaled, -0.99, 0.99)
+            if self.rrq_targets is not None:
+                acoustic_data = self.rrq_targets.get(sample['item_name'], sample['audio_path'], len(phone_encoded))
             else:
-                wav_rescaled = wav
-            
-            acoustic_data = self.audio_tokenizer.encode(wav_rescaled)
+                original_rms = audio_rms(wav)
+                if volume_label != 'None':
+                    rms_rescaled = random.uniform(self.volume_type[volume_label][0], self.volume_type[volume_label][1])
+                    wav_rescaled = wav / original_rms * rms_rescaled
+                    wav_rescaled = torch.clamp(wav_rescaled, -0.99, 0.99)
+                else:
+                    wav_rescaled = wav
+                acoustic_data = self.audio_tokenizer.encode(wav_rescaled)
             
             acoustic_encoded_lines = []
             for code_idx, tokenized in enumerate(acoustic_data[:self.num_coarse_quantizers]):
@@ -535,6 +548,8 @@ class T2ASingT5Dataset(FairseqDataset):
 
             min_len = min(sample_encoded['phone'].shape[0], sample_encoded['f0_rescale'].shape[0])
             min_len = min(min_len, sample_encoded['acoustic'].shape[0])
+            if self.rrq_targets is not None and any(len(sample_encoded[k]) != min_len for k in ('phone','f0_rescale','acoustic')):
+                raise ValueError('RRQ forbids implicit truncation of phone/F0/acoustic alignment')
 
             sample_encoded['f0_rescale'] = sample_encoded['f0_rescale'][:min_len]
             sample_encoded['phone'] = sample_encoded['phone'][:min_len]
@@ -583,6 +598,8 @@ class T2ASingT5Dataset(FairseqDataset):
             if sample['task'] == self.spec_tokens['text_to_acoustic_sing']:
                 phone, acoustic, f0_rescale = sample['phone'],  sample['acoustic'], sample['f0_rescale']
                 if len(phone) > self.batch_max_frames:
+                    if self.rrq_targets is not None:
+                        raise ValueError('RRQ phrases must fit batch_max_frames; crop BEFORE cache generation')
                     phone, start = self.crop_to_max_size(phone, self.batch_max_frames, None if self.is_train_split else 0)
                     acoustic, _ = self.crop_to_max_size(acoustic, round(self.batch_max_frames), round(start))
                     f0_rescale, _ = self.crop_to_max_size(f0_rescale, self.batch_max_frames, start)
@@ -712,6 +729,13 @@ class T2ASingT5Dataset(FairseqDataset):
             "source_prefix_mask": source_prefix_mask,
             "target_acoustic_mask": target_loss_mask
         }
+        if self.rrq_targets is not None:
+            from rrq.training import suffix_mask
+            # Keep net_input target_acoustic_mask intact: it controls model attention.
+            return_dict['target_loss_mask'] = suffix_mask(target, target_loss_mask, self.uni_dict)
+            return_dict['ntokens'] = int(return_dict['target_loss_mask'].sum())
+            if not return_dict['ntokens']:
+                raise ValueError('empty RRQ suffix supervision')
 
         return return_dict
 

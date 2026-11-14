@@ -94,8 +94,9 @@ class AcousticLanguageModelingCrossEntropyCriterion(FairseqCriterion):
         if lprobs.shape[1] > target.shape[-1]:
             lprobs = lprobs[:, :target.shape[-1], :]
 
-        lprobs = lprobs[sample['target_acoustic_mask']].contiguous()
-        target = torch.masked_select(target, sample['target_acoustic_mask']).contiguous()
+        loss_mask = sample.get('target_loss_mask', sample['target_acoustic_mask'])
+        lprobs = lprobs[loss_mask].contiguous()
+        target = torch.masked_select(target, loss_mask).contiguous()
 
         return lprobs, target
 

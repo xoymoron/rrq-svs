@@ -197,3 +197,53 @@ If you find this code useful in your research, please cite our work:
 
 ## Disclaimer
 Any organization or individual is prohibited from using any technology mentioned in this paper to generate someone's singing without his/her consent, including but not limited to government leaders, political figures, and celebrities. If you do not comply with this item, you could be in violation of copyright laws.
+
+---
+
+## RRQ extension (2026-11-15)
+
+This fork adds a **frozen oracle diagnostic and opt-in cached-target training adapter**.
+It is not a trained RRQ checkpoint and is not a zero-shot singer-cloning implementation.
+Original upstream: `14816cda5aae948cf0f84bd9f5b19b7189154666`.
+
+### Quick start (PowerShell, repository root)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install -r requirements-rrq.txt
+.\.venv\Scripts\python.exe -m rrq fetch-assets
+.\.venv\Scripts\python.exe -m pytest rrq_tests -q
+.\.venv\Scripts\python.exe -m rrq smoke --output artifacts/smoke-new
+```
+
+For GPU execution install the appropriate PyTorch build instead. Linux uses `.venv/bin/python`.
+The frozen diagnostic needs no Fairseq, T5 or full generator checkpoint. The pinned download is about 794 MB, with SHA256 checks and no silent overwrite of corrupt files. `smoke` uses a synthetic harmonic signal and explicitly **GT-derived perturbed tokens**. It checks wiring only; its metrics are not singing-quality or real-error evidence. A run directory cannot be reused.
+
+### Real model error diagnostic
+
+1. Run the original Prompt-Singer generator in its supported environment (the upstream instructions above), without teacher-forcing acoustic target tokens. This needs the additional generator/T5 assets. They are **not** downloaded by `fetch-assets`.
+2. Use fixed prompt text, `volume=None`, original phrase boundaries and matching 50 Hz input conditions. The native recipe consumes aligned phonemes and F0; identify those runs as `annotation_conditioned`, not score-native or zero-shot.
+3. Import the exact original `D-ID<TAB>...` output:
+
+```powershell
+.\.venv\Scripts\python.exe -m rrq import-codes --input generate-test.txt --output artifacts/predictions --generator CHECKPOINT_HASH_AND_REVISION --seed 0
+.\.venv\Scripts\python.exe -m rrq diagnostic --manifest YOUR_MANIFEST.jsonl --output artifacts/diagnostic-new --device cpu
+```
+
+Copy the row structure from `rrq_examples/manifest.jsonl`. Paths are relative to the manifest. Match generated D-IDs to target recordings yourself; IDs alone do not establish alignment. `alignment=same_50hz_grid` is an explicit caller attestation, not an automatic proof. Frame mismatch is rejected, never cropped. Use mono phrases 0.2–13 seconds, explicit `gain=1`, and split/crop them before generation. No automatic normalization, DTW or delay fitting is performed. Only codec right padding of less than one frame is applied and reported. Import provenance is user-declared; the tool cannot prove an external token file was honestly generated.
+
+Outputs per phrase: `codec.wav`, `model.wav`, `exposure.wav`, `rrq_oracle.wav`, and `targets.npz`. All use the **actual 24 kHz CodeBigVGAN**, not a substituted native decoder. The report includes native latent MSE, multi-resolution spectral distance, autocorrelation F0/voicing diagnostics, input/model/source hashes, individual results and equal-weight singer summaries with paired deltas against Exposure and the model. F0 is a lightweight diagnostic estimator (60–1500 Hz), not a validated singing-quality evaluator; `null` means no jointly voiced frames. No perceptual superiority or statistical significance is inferred.
+
+### Cached-target training
+
+After a real diagnostic, merge `rrq_examples/training-overlay.yaml` into the original training data config. Run the same upstream `fairseq-train` recipe for `arm: clean`, `arm: exposure`, and `arm: rrq`, from the same starting checkpoint and with the same update/optimizer/data settings. The extension does not choose those budgets for you.
+
+- Train and validation samples must have fixed prompt text, `volume=None`, matching audio hash, cache ID and frame count. All phrases must fit `batch_max_frames`; implicit frame truncation and random crop are disabled in this mode.
+- `rho` is a deterministic, **fixed per-sequence subset** chosen from `(seed,item_name)`, independent of arm and loader ordering. It is not resampled per epoch.
+- The cache replaces the entire acoustic token map, so context and labels are consistent. The criterion supervises only codebooks 2 and 3, with a separate loss mask that leaves model attention masks unchanged.
+- The full generator's parameters remain whatever the original trainer makes trainable. **Shared parameters and changed suffix history can change future first-code predictions.** This implementation does not claim an independently frozen G1 or identical first-code trajectories after fine-tuning. Fixed cache controls training examples, not post-training inference trajectories.
+- `synthetic_smoke` cache is rejected for training. Use held-out singer/song splits before generating training/validation/test caches. The code does not manufacture a split or guarantee pretraining non-overlap.
+- Unit/adapter tests and real pretrained codec/vocoder smoke were run locally. **Full Fairseq/T5 generator inference and SVS fine-tuning were not run in this implementation environment.** Python/PyTorch compatibility of that separate full upstream stack remains to be validated.
+
+Code map: `rrq/core.py` native requantization; `rrq/io.py` strict import/manifest; `rrq/pipeline.py` four-arm experiment; `rrq/metrics.py` diagnostics; `rrq/training.py` cached training hook; `rrq/cli.py` commands. Research decisions and review history remain in the parent `SVS_RESEARCH_RECORD.md`.

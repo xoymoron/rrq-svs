@@ -11,7 +11,6 @@ from torch.nn.parallel.distributed import _find_tensors
 import torch.optim
 import torch.utils.data
 from packaging import version
-from omegaconf import OmegaConf
 
 
 def set_random_seed(seed):
@@ -26,6 +25,7 @@ def is_logging_process():
 
 
 def get_logger(cfg, name=None):
+    from omegaconf import OmegaConf
     # log_file_path is used when unit testing
     if is_logging_process():
         logging.config.dictConfig(

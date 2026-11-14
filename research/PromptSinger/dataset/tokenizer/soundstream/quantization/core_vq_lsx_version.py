@@ -47,7 +47,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from .distrib import broadcast_tensors, rank, is_distributed
-from research.PromptSinger.dataset.tokenizer.soundstream.utils.ddp_utils import SyncFunction
+from ..utils.ddp_utils import SyncFunction
 
 
 def default(val: tp.Any, d: tp.Any) -> tp.Any:

@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from research.PromptSinger.dataset.tokenizer.soundstream.modules.seanet import SEANetEncoder, SEANetDecoder
-from research.PromptSinger.dataset.tokenizer.soundstream.quantization  import ResidualVectorQuantizer
+from ..modules.seanet import SEANetEncoder, SEANetDecoder
+from ..quantization import ResidualVectorQuantizer
 
 
 class SoundStream(nn.Module):
