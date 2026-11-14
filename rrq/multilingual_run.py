@@ -101,13 +101,15 @@ def setup(args):
     if old!=info['base_size']: raise ValueError('checkpoint/dictionary base vocabulary mismatch')
     if model.global_model.prefix_lm: raise ValueError('expected published causal checkpoint')
     prompt_data=torch.load(args.prompt,map_location='cpu',weights_only=True)
+    if prompt_data['checkpoint_sha256']!=sha256(args.assets/T5/'pytorch_model.bin') or prompt_data['prompt']!='A singer sings.' or not prompt_data.get('upstream_padding_policy'):
+        raise ValueError('prompt feature provenance differs from official fixed prompt')
     prompt=prompt_data['feature'].to(args.device)
-    if prompt.shape!=(1,77,cfg['text_enc_dim']): raise ValueError('prompt shape mismatch')
+    if prompt.shape!=(1,77,cfg['text_enc_dim']) or not torch.isfinite(prompt).all(): raise ValueError('invalid prompt feature')
     return model,vocab,old,cfg,prompt
 
 
-def loss_for(model,row,vocab,prompt,cache,device,rrq_cache=None):
-    if rrq_cache is None: codes=load_codes(cache/(safe_id(row['id'])+'.npz'),row)
+def loss_for(model,row,vocab,prompt,cache,device,codec_sha256,rrq_cache=None):
+    if rrq_cache is None: codes=load_codes(cache/(safe_id(row['id'])+'.npz'),row,codec_sha256)
     else: codes=rrq_cache.get(row['id'],row['audio'],row['n_frames'])
     tokens,mask,_=pack(row,vocab,codes)
     if rrq_cache is not None:  # matched suffix-only objective for all three RRQ arms
@@ -129,6 +131,7 @@ def train(args):
     validation=balanced_rows(rows,'valid',True,args.seed)
     if not schedule: raise ValueError('no primary training examples')
     model,vocab,old,cfg,prompt=setup(args)
+    codec_hash=sha256(args.assets/'codec/ckpt_01135000.pth')
     model.eval().requires_grad_(False)
     weight=model.global_model.transformer.wte.weight
     weight.requires_grad_(True)
@@ -140,7 +143,8 @@ def train(args):
     rrq_cache=None
     if args.rrq_cache:
         from .training import CachedTargets
-        rrq_cache=CachedTargets(dict(cache_dir=str(args.rrq_cache),arm=args.arm,rho=args.rho,seed=args.seed))
+        rrq_cache=CachedTargets(dict(cache_dir=str(args.rrq_cache),arm=args.arm,rho=args.rho,seed=args.seed,
+                                    expected_codec_sha256=codec_hash))
     args.output.mkdir(parents=True)
     records=[]
     print('TRAIN_START',json.dumps(dict(steps=args.steps,languages=sorted({r['language'] for r in schedule}),
@@ -149,7 +153,7 @@ def train(args):
     with (args.output/'steps.jsonl').open('w',encoding='utf-8') as log:
         for step in range(args.steps):
             row=schedule[step%len(schedule)]; opt.zero_grad(set_to_none=True)
-            loss=loss_for(model,row,vocab,prompt,args.cache,args.device,rrq_cache)
+            loss=loss_for(model,row,vocab,prompt,args.cache,args.device,codec_hash,rrq_cache)
             loss.backward()
             norm=torch.nn.utils.clip_grad_norm_([weight],1.)
             if not torch.isfinite(norm): raise ValueError('nonfinite gradient')
@@ -163,12 +167,13 @@ def train(args):
     with torch.no_grad():
         for row in validation:
             # Plain clean CE is only a runtime check, not an RRQ comparison.
-            value=float(loss_for(model,row,vocab,prompt,args.cache,args.device))
+            value=float(loss_for(model,row,vocab,prompt,args.cache,args.device,codec_hash))
             metrics.append(dict(id=row['id'],language=row['language'],clean_ce=value))
             print('VALID_SMOKE',json.dumps(metrics[-1]),flush=True)
     base_hash=sha256(args.assets/ACOUSTIC)
     torch.save(dict(new_global_rows=weight[old:].detach().cpu(),base_size=old,
         vocabulary_sha256=sha256(args.bundle/'vocabulary.json'),base_checkpoint_sha256=base_hash,
+        prompt_sha256=sha256(args.prompt),codec_sha256=codec_hash,
         steps=args.steps,config=cfg,smoke=args.smoke),args.output/'adapter.pt')
     write_json(args.output/'report.json',dict(steps=args.steps,train_examples=len(schedule),
         languages=sorted({r['language'] for r in schedule}),validation_smoke=metrics,
@@ -179,6 +184,13 @@ def train(args):
     print('ADAPTATION_COMPLETE',str(args.output),flush=True)
 
 
+def validate_adapter(state,old,vocabulary_sha256,base_checkpoint_sha256,prompt_sha256):
+    if state['vocabulary_sha256']!=vocabulary_sha256 or state['base_size']!=old or state['base_checkpoint_sha256']!=base_checkpoint_sha256:
+        raise ValueError('adapter provenance mismatch')
+    if state.get('prompt_sha256')!=prompt_sha256:
+        raise ValueError('adapter prompt provenance mismatch')
+
+
 def rollout(args):
     if args.output.exists(): raise ValueError('rollout output already exists')
     rows=balanced_rows(read_rows([args.bundle/'primary.jsonl']),args.split,True,args.seed)
@@ -187,8 +199,7 @@ def rollout(args):
     base_hash=sha256(args.assets/ACOUSTIC)
     if args.adapter:
         state=torch.load(args.adapter,map_location='cpu',weights_only=True)
-        if state['vocabulary_sha256']!=sha256(args.bundle/'vocabulary.json') or state['base_size']!=old or state['base_checkpoint_sha256']!=base_hash:
-            raise ValueError('adapter provenance mismatch')
+        validate_adapter(state,old,sha256(args.bundle/'vocabulary.json'),base_hash,sha256(args.prompt))
         with torch.no_grad(): model.global_model.transformer.wte.weight[old:].copy_(state['new_global_rows'])
     model.eval().requires_grad_(False)
     args.output.mkdir(parents=True)
@@ -201,6 +212,7 @@ def rollout(args):
         dest=args.output/(safe_id(row['id'])+'.npz')
         save_prediction(dest,codes,dict(id=row['id'],origin='model_rollout',frame_rate=50,
             generator='Prompt-Singer multilingual append-only adapter',base_checkpoint_sha256=base_hash,
+            prompt_sha256=sha256(args.prompt),vocabulary_sha256=sha256(args.bundle/'vocabulary.json'),
             adapter_sha256=sha256(args.adapter) if args.adapter else None,
             target_audio_used_for_prediction=False,conditioning='score_pitch_gt_phone_duration',
             sampling='greedy exact annotated duration',full_phrase=frames==row['n_frames']))

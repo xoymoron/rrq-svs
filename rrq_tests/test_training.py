@@ -45,6 +45,12 @@ def test_cached_training_rejects_stale_audio_wrong_frames_and_synthetic(tmp_path
     with pytest.raises(ValueError,match='synthetic'): synthetic.get('x',audio2,8)
 
 
+def test_cached_training_checks_expected_codec_provenance(tmp_path):
+    audio=cache(tmp_path)
+    targets=CachedTargets({'cache_dir':str(tmp_path/'cache'),'expected_codec_sha256':'official'})
+    with pytest.raises(ValueError,match='codec checkpoint'): targets.get('x',audio,8)
+
+
 def test_loss_mask_only_trains_suffix_tokens_in_acoustic_region():
     # A dictionary need not assign consecutive IDs; classify by explicit token names.
     class Dictionary:

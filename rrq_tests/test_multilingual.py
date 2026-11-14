@@ -81,3 +81,38 @@ def test_fast_ar_step_matches_teacher_forced_causal_logits():
     context=next_patch_context(model,prefix,prompt)
     actual=patch_logits(model,context,current)
     torch.testing.assert_close(actual,expected[:,-3:],rtol=1e-5,atol=1e-6)
+
+
+def test_runtime_schedule_and_cache_reject_stale_audio(tmp_path):
+    import json
+    from rrq.multilingual_run import balanced_rows, load_codes
+    from rrq.io import sha256
+    a=row(tmp_path); a['n_frames']=20
+    b=dict(a,id='valid',split='valid',n_frames=10)
+    c=dict(a,id='ja',language='Japanese')
+    selected=balanced_rows([a,b,c],'train',smoke=True)
+    assert {r['id'] for r in selected}=={'test','ja'}
+    cached=tmp_path/'codes.npz'
+    np.savez(cached,codes=np.zeros((3,20),dtype=np.int64),metadata=np.array(json.dumps(dict(
+        id=a['id'],target_audio_sha256=sha256(a['audio']),frame_rate=50,codec_sha256='known'))))
+    assert load_codes(cached,a,'known').shape==(3,20)
+    Path(a['audio']).write_bytes(b'changed')
+    with pytest.raises(ValueError,match='stale'): load_codes(cached,a,'known')
+
+
+def test_training_rejects_wrong_codec_before_forward(tmp_path):
+    import json
+    from rrq.multilingual_run import loss_for
+    from rrq.io import sha256
+    r=row(tmp_path)
+    np.savez(tmp_path/'test.npz',codes=np.zeros((3,20),dtype=np.int64),metadata=np.array(json.dumps(dict(
+        id=r['id'],target_audio_sha256=sha256(r['audio']),frame_rate=50,codec_sha256='wrong'))))
+    with pytest.raises(ValueError,match='codec checkpoint changed'):
+        loss_for(None,r,None,None,tmp_path,'cpu',codec_sha256='expected')
+
+
+def test_adapter_rejects_changed_prompt():
+    from rrq.multilingual_run import validate_adapter
+    state=dict(base_size=3960,vocabulary_sha256='v',base_checkpoint_sha256='b',prompt_sha256='old')
+    with pytest.raises(ValueError,match='prompt'):
+        validate_adapter(state,3960,'v','b','new')

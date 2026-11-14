@@ -288,7 +288,8 @@ redistribute them. Other previously considered corpora are **not claimed loaded*
 OpenSinger needs verified external alignments for this recipe; AIHub corpora need
 account/access arrangements; SingStyle111 needs source access confirmation; the
 single-singer corpora (Opencpop, CSD, Kiritan, KiSing original, PJS, Namine Ritsu,
-Oniku Kurumi, Ofuton-P) do not increase multi-singer coverage. jaCappella ensemble
+Oniku Kurumi, Ofuton-P) can collectively add singer/language diversity, but their
+score/lyric/audio alignment and license adapters are not implemented yet. jaCappella ensemble
 recordings need a different isolated-vocal/annotation contract. They are deferred,
 not automatically mixed into the two supported adapters.
 
@@ -303,10 +304,11 @@ removed. Raw F0 is retained alongside the original mean-222 discrete encoding.
 
 **Compatibility and experiment boundaries:**
 
-- Public Prompt-Singer has a Mandarin phoneme vocabulary. Foreign phones are
-  retained as-is in the common manifest and excluded from TSV export, never
+- The **legacy TSV exporter** targets the original Mandarin vocabulary. Foreign phones are
+  retained as-is in the common manifest and excluded from that old TSV export, never
   mapped to UNK or deceptively stripped of language suffixes. Only Chinese `_zh`
-  suffixes and explicit silence/breath aliases are normalized.
+  suffixes and explicit silence/breath aliases are normalized. Use the multilingual
+  path below for current experiments; the legacy TSV is not the training population.
 - TSVs use a fixed neutral prompt and `volume=None`; gender and range attributes
   are not guessed. All arms must use the same prompt/conditioning. Target F0 and
   durations make this **annotation-conditioned**, not score-only SVS.
@@ -323,7 +325,7 @@ removed. Raw F0 is retained alongside the original mean-222 discrete encoding.
 - Prepared TSVs still need real generator rollouts and RRQ target caches before
   cached-target training; preprocessing does not manufacture predictions.
 
-Deployment validation (2026-11-15, Python 3.10 / PyTorch 2.6.0+cu124 / RTX 3090):
+Initial legacy deployment validation (2026-11-15, superseded for multilingual input below):
 62 tests passed, `pip check` passed, and the pretrained codec/decoder CUDA smoke
 completed. Both 32-per-singer pilots produced 640 validated phrases with no
 preprocessing rejections: GTSinger 1.724 hours, M4Singer 0.923 hours. Compatible
@@ -336,3 +338,88 @@ distinct people) passed the actual CUDA codec clock and native RRQ clean-prefix
 identity checks. The official GTSinger release mixes `.TextGrid` and `_TextGrid`
 filenames; the downloader preserves and records the resolved original name.
 These are deployment/data checks, **not SVS quality or zero-shot results**.
+
+### Multilingual input and native acoustic runner
+
+The current default dataset is **non-Chinese GTSinger**, with Chinese GTSinger and
+M4Singer retained separately as auxiliary data. No phrase is discarded because
+the pretrained model's dictionary lacks its phonemes. The existing bounded pilot
+exports all 1,280 phrases: 576 primary (8 languages), 704 auxiliary, 0 rejected.
+The primary split is 472 train / 50 valid / 54 test under the existing provisional
+song-title grouping. Not every language necessarily occurs in every split.
+
+`rrq.multilingual` preserves all 3,960 original token IDs and appends 365 native,
+language-qualified phonemes for this pilot. The vocabulary can also append missing
+pitch tokens. It never clips an out-of-range note or substitutes UNK. Lyric text,
+notes, phone durations, waveform paths/hashes and original metadata remain in each
+manifest. If M4Singer has only phonetic lyrics, that is explicitly labeled; no
+orthographic lyrics are invented. Scores require MIDI note numbers, not an actual
+`.mid` container. GTSinger's supplied MusicXML is retained in the raw dataset.
+
+**Conditioning change:** the new path converts supplied score note pitches into
+the existing mean-222 pitch representation, on the **provided phone-duration
+clock**. It does not read target waveform or extracted F0 to build inference
+inputs. It does not predict durations from a new score. The original acoustic
+model, three 1,024-entry RVQ codebooks and 24 kHz CodeBigVGAN remain unchanged.
+All comparison arms must use this same conditioning, vocabulary, prompt and split.
+Comparing it directly against an original target-F0-conditioned baseline would
+confound the RRQ effect.
+
+`acoustic_core.py` is the original Torch architecture separated from its Fairseq
+registration wrapper. Checkpoint loading is strict. Global/local embeddings and
+output head grow by appending rows; original rows are copied exactly. The
+standalone warmup updates **only newly added global input embedding rows**, with
+zero weight decay and a checked frozen old-row prefix. The acoustic backbone,
+codec, vocoder and T5 remain frozen. This is a small adaptation baseline, not a
+new pretrained multilingual model. New phoneme rows start from a mean plus seeded
+noise and must learn from the multilingual data.
+
+The generator computes the native causal global network and only the current
+local patch. A regression test compares its logits to the full native forward.
+It generates acoustic codes autoregressively without target acoustic teacher
+forcing, for the exact annotated duration. The fixed neutral T5 prompt is encoded
+by the official fine-tuned checkpoint, with the original padding policy. This
+does **not** implement reference-audio singer cloning or learned duration control.
+
+Run inside the visible server tmux session (`tmux attach -t svs-rrq`):
+
+```bash
+cd ~/SVS/rrq-svs
+source ../.venv/bin/activate
+export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
+set -o pipefail
+python -m pip install -r requirements-multilingual.txt
+# Adds ~8.46 GB of pinned acoustic/T5 files; preserves 12 GiB free space.
+python -u -m rrq.assets --with-backbone 2>&1 | tee ../logs/backbone-download.log
+
+# Use a fresh output directory; existing source/audio/features are not copied.
+python -u -m rrq.multilingual \
+  --manifests ../data/gtsinger-processed/manifest.jsonl ../data/m4singer-processed/manifest.jsonl \
+  --output ../data/multilingual
+python -u -m rrq.multilingual_run --device cuda:1 cache \
+  --manifest ../data/multilingual/all.jsonl --output ../data/multilingual/codec-cache \
+  2>&1 | tee ../logs/multilingual-codec-cache.log
+python -u -m rrq.multilingual_run prompt --output artifacts/multilingual-prompt.pt
+python -u -m rrq.multilingual_run train \
+  --bundle ../data/multilingual --prompt artifacts/multilingual-prompt.pt \
+  --cache ../data/multilingual/codec-cache --steps 32 --smoke \
+  --output artifacts/multilingual-smoke 2>&1 | tee ../logs/multilingual-train.log
+python -u -m rrq.multilingual_run rollout \
+  --bundle ../data/multilingual --prompt artifacts/multilingual-prompt.pt \
+  --adapter artifacts/multilingual-smoke/adapter.pt --split train \
+  --output artifacts/multilingual-rollout 2>&1 | tee ../logs/multilingual-rollout.log
+```
+
+`--smoke` uses one shortest **training** phrase per language to bound integration
+cost. Without it, the runner traverses all primary training phrases in a seeded
+language-interleaved schedule. Auxiliary data is preserved but is never silently
+mixed into this primary schedule. Validation smoke uses a distinct valid split.
+`--max-frames N` produces explicitly partial previews; they are excluded from
+diagnostic manifests. Full rollouts can feed the existing four-arm diagnostic
+and its oracle RRQ target-cache generator. For matched downstream adaptation,
+`train --rrq-cache CACHE --arm clean|exposure|rrq` uses the existing provenance-
+checked target maps and suffix-only loss for all three arms.
+
+Runtime smoke losses and decoder outputs only establish that the path works.
+Neither token coverage nor a few embedding updates establish multilingual quality,
+RRQ improvement, unseen-singer performance, or an acceptable paper result.

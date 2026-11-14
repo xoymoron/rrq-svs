@@ -20,6 +20,7 @@ class CachedTargets:
         self.arm = config.get('arm','rrq')
         self.rho = float(config.get('rho',.5))
         self.seed = int(config.get('seed',0))
+        self.expected_codec_sha256 = config.get('expected_codec_sha256')
         if self.arm not in {'clean','exposure','rrq'} or not 0 <= self.rho <= 1:
             raise ValueError('invalid RRQ arm or mixture rate')
 
@@ -36,6 +37,8 @@ class CachedTargets:
             raise ValueError('cached training requires gain=1 and explicit oracle targets')
         if meta.get('target_sha256') != sha256(audio):
             raise ValueError('target audio hash mismatch: rebuild cache')
+        if self.expected_codec_sha256 is not None and meta.get('provenance',{}).get('codec_sha256') != self.expected_codec_sha256:
+            raise ValueError('codec checkpoint mismatch in RRQ cache')
         if any(m.shape != (3,frames) for m in maps):
             raise ValueError('cached training frame mismatch')
         # A stable sequence-level choice independent of arm, worker order and RNG.
