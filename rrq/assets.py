@@ -18,7 +18,7 @@ BACKBONE_FILES = {
     'flant5-large-finetuned/checkpoint-40000/config.json': {'bytes':828,'sha256':'5368d6a085a7ba6d6e51514cec780489469db7cc9386e5a17c110836b046dc04'},
     'flant5-large-finetuned/checkpoint-40000/special_tokens_map.json': {'bytes':2201,'sha256':'5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f'},
     'flant5-large-finetuned/checkpoint-40000/spiece.model': {'bytes':791656,'sha256':'d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86'},
-    'flant5-large-finetuned/checkpoint-40000/tokenizer_config.json': {'bytes':2367,'sha256':'27c113258803c4e8a0f9ef7245cc773d28f5a39c0b8a266950b911b9cb39768b9'},
+    'flant5-large-finetuned/checkpoint-40000/tokenizer_config.json': {'bytes':2367,'sha256':'27c113258803c4e8a0f9ef7245cc773d28f5a39c0b8a266950b91b9cb39768b9'},
 }
 
 

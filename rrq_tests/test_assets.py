@@ -5,6 +5,14 @@ import pytest
 from rrq.assets import fetch_assets
 
 
+def test_pinned_metadata_has_valid_digest_and_size():
+    import re
+    from rrq.assets import FILES, BACKBONE_FILES
+    for item in {**FILES,**BACKBONE_FILES}.values():
+        assert re.fullmatch('[0-9a-f]{64}',item['sha256'])
+        assert isinstance(item['bytes'],int) and item['bytes']>0
+
+
 def test_asset_hash_checked_and_existing_corrupt_file_not_overwritten(tmp_path,monkeypatch):
     import rrq.assets as assets
     data=b'known official fixture'
