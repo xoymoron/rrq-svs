@@ -89,3 +89,16 @@ def test_rrq_map_preserves_forced_prefix_and_corrected_context():
     assert torch.equal(rrq[0],exposure[0])
     assert (rrq[1:,0]==2).all() and (exposure[1:,0]==0).all()
     assert torch.equal(rrq[:,1],clean[:,1])
+
+
+def test_clean_prefix_audit_reports_changes_without_replacing_codec_tokens():
+    from rrq.dac_codec import DACLayer, clean_prefix_audit
+    from dac.nn.quantize import ResidualVectorQuantize
+    q=ResidualVectorQuantize(input_dim=8,n_codebooks=3,codebook_size=16,codebook_dim=4).eval().requires_grad_(False)
+    layers=nn.ModuleList([DACLayer(x) for x in q.quantizers]).eval()
+    z=torch.randn(1,8,7);native=q(z)[1].permute(1,0,2)
+    altered=native.clone();altered[-1]=(altered[-1]+1)%16
+    before=altered.clone();audit=clean_prefix_audit(z,altered,layers)
+    assert audit['changed_tokens']>0
+    assert audit['total_tokens']==21
+    assert torch.equal(altered,before)

@@ -8,6 +8,15 @@ from .core import requantize
 from .io import sha256
 
 
+@torch.inference_mode()
+def clean_prefix_audit(z, native, layers):
+    """Do not substitute labels: upstream frozen STE can round differently."""
+    recoded=requantize(z,native[:1],layers)
+    changed=(recoded!=native)
+    return dict(changed_tokens=int(changed.sum()),total_tokens=native.numel(),
+                per_codebook=changed.flatten(1).sum(1).cpu().tolist())
+
+
 class DACLayer(nn.Module):
     def __init__(self, native):
         super().__init__()
@@ -41,9 +50,9 @@ class FrozenDAC(nn.Module):
         z = self.codec.encoder(padded)
         _, codes, *_ = self.codec.quantizer(z)
         native = codes.permute(1, 0, 2).contiguous()
-        # Test on real pretrained weights too, not only synthetic quantizers.
-        if not torch.equal(requantize(z, native[:1], self.layers), native):
-            raise RuntimeError('DAC adapter failed native clean-prefix identity')
+        # Preserve upstream tokens. Its STE arithmetic is not bitwise identical
+        # to from_codes decoding, even when gradients are disabled. Measure this
+        # separately; never silently replace the pretrained codec's labels.
         return z, native
 
     @torch.inference_mode()

@@ -17,8 +17,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from .core import make_arms
-from .dac_codec import FrozenDAC
+from .core import make_arms, requantize
+from .dac_codec import FrozenDAC, clean_prefix_audit
 from .distributed import Distributed
 from .io import sha256, write_json
 from .metrics import audio_metrics, mean_maps
@@ -109,11 +109,15 @@ def cache_data(args,d,rows,device):
         try:
             x=load_audio(source,codec.sample_rate)
             z,codes=codec.encode(torch.from_numpy(x)[None,None].to(device))
+            audit=clean_prefix_audit(z,codes,codec.layers)
+            if audit['changed_tokens']:
+                print('DAC_CLEAN_PREFIX_NUMERICS',row['id'],json.dumps(audit),flush=True)
             cond=frame_condition(row,z.shape[-1],len(x),codec.sample_rate,codec.hop)
             atomic_save(dict(id=row['id'],z=z.cpu() if row['split']=='valid' else torch.empty(0),codes=codes.cpu(),
                 frame_index=torch.from_numpy(cond['phone_index']),samples=len(x),
                 sample_rate=codec.sample_rate,hop=codec.hop,codec_sha256=codec.fingerprint,
-                source_sha256=source_hash,annotation_sha256=annotation_hash(row)),path)
+                source_sha256=source_hash,annotation_sha256=annotation_hash(row),
+                clean_prefix_audit=audit),path)
         except ValueError as exc:
             errors.append(dict(id=row['id'],reason=str(exc)))
     all_errors=d.gather(errors)
@@ -141,6 +145,8 @@ def evaluate(args,d,rows,device,oracle=False):
         if c['codec_sha256']!=codec.fingerprint:raise ValueError('wrong codec checkpoint')
         x=load_audio(row['audio'],codec.sample_rate)
         arms={'codec':c['codes']}
+        if not oracle:
+            arms['codec_clean_prefix_requantized']=requantize(c['z'],c['codes'][:1],codec.layers)
         if oracle:
             with torch.inference_mode():
                 prediction=model.generate(**score_batch(row,c,vocab,device)).permute(1,0,2)
@@ -158,6 +164,7 @@ def evaluate(args,d,rows,device,oracle=False):
             result[arm]['latent_mse']=float(F.mse_loss(zhat,c['z']))
             sf.write(folder/(row['id']+'-'+arm+'.wav'),y,codec.sample_rate,subtype='FLOAT')
         item=dict(id=row['id'],singer=row['singer'],language=row['language'],arms=result)
+        item['clean_prefix_audit']=clean_prefix_audit(c['z'],c['codes'],codec.layers)
         if oracle:
             item.update(coarse_match=float((prediction[0]==c['codes'][0]).float().mean()),
                 suffix_changed=float((arms['rrq_oracle'][1:]!=c['codes'][1:]).float().mean()),
