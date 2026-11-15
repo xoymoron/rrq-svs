@@ -19,8 +19,11 @@ def safe_relative(value):
 def free_space(path, required=0, reserve=12*1024**3):
     p=Path(path)
     while not p.exists(): p=p.parent
-    if shutil.disk_usage(p).free < required+reserve:
-        raise ValueError('disk reserve would be violated')
+    available=shutil.disk_usage(p).free
+    if available < required+reserve:
+        raise ValueError(f'disk reserve would be violated at {p}: free={available} bytes, '
+                         f'required={required} bytes, reserve={reserve} bytes; '
+                         f'shortfall={required+reserve-available} bytes')
 
 
 class RangeReader(io.RawIOBase):

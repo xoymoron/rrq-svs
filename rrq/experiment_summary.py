@@ -12,7 +12,24 @@ from .experiment import ARMS, SEEDS, atomic_json
 METRICS=('cer','mrstft_sc','mrstft_logmag','f0_rmse_cents','voicing_error','joint_voiced_fraction','latent_mse')
 
 
+def asr_diagnostics(rows):
+    rates=[r['metrics']['cer'] for r in rows if r['metrics'].get('cer') is not None]
+    counted=[r for r in rows if all(k in r['metrics'] for k in ('character_edits','reference_characters'))]
+    chars=sum(r['metrics']['reference_characters'] for r in counted)
+    known=[r for r in rows if 'asr_hit_length_cap' in r]
+    return dict(character_weighted_cer=sum(r['metrics']['character_edits'] for r in counted)/chars
+                if len(counted)==len(rows) and chars>0 else None,
+                median_phrase_cer=float(np.median(rates)) if rates else None,
+                p90_phrase_cer=float(np.quantile(rates,.9)) if rates else None,
+                cap_count=sum(bool(r['asr_hit_length_cap']) for r in known),cap_known_count=len(known),
+                cap_fraction=sum(bool(r['asr_hit_length_cap']) for r in known)/len(known) if known else None)
+
+
 def summarize_rows(rows):
+    ids=[r['id'] for r in rows]
+    if len(ids)!=len(set(ids)): raise ValueError('duplicate evaluation IDs')
+    if any(v is not None and not np.isfinite(v) for r in rows for v in r['metrics'].values()):
+        raise ValueError('nonfinite evaluation metric')
     groups=defaultdict(list)
     for r in rows: groups[r['language']].append(r['metrics'])
     means={language:{key:float(np.mean([r[key] for r in items if r.get(key) is not None]))
@@ -20,7 +37,11 @@ def summarize_rows(rows):
            for language,items in groups.items()}
     macro={key:float(np.mean([r[key] for r in means.values() if r[key] is not None]))
            if any(r[key] is not None for r in means.values()) else None for key in METRICS}
-    return dict(n=len(rows),language_macro=macro,per_language=means)
+    return dict(n=len(rows),language_macro=macro,per_language=means,
+        per_language_counts={language:len(items) for language,items in groups.items()},
+        metric_support={key:sum(r['metrics'].get(key) is not None for r in rows) for key in METRICS},
+        asr_diagnostics=asr_diagnostics(rows),
+        per_language_asr={language:asr_diagnostics([r for r in rows if r['language']==language]) for language in groups})
 
 
 def paired_song_ci(left,right,key,seed=4567):

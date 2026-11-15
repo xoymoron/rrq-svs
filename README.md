@@ -570,3 +570,15 @@ trainable parameter SHA256 after the first optimizer update and each epoch.
 each rank's phrase ID, loss, language, mixture draw, and peak allocated GPU memory.
 Validation generation/ASR now runs before the full training target cache, so poor
 multilingual pronunciation is visible earlier; loss reduction is not a quality gate.
+
+### Metric interpretation
+
+`language_macro.cer` remains the primary existing CER definition. Reports also
+include median/p90 phrase CER, character-weighted CER, ASR length-cap counts and
+language sample counts. None of these excludes failed phrases. They measure
+separate aggregation choices and must not be substituted opportunistically.
+`metric_support` records how many phrases contribute each metric (F0 RMSE can be
+undefined without jointly voiced frames). Duplicate IDs/nonfinite metrics fail.
+Validation CE explicitly names `clean_suffix_teacher_forced` or
+`clean_all_codebooks_teacher_forced`; RRQ training CE uses changed targets and
+must not be compared numerically to clean-target training CE as a quality score.

@@ -204,7 +204,9 @@ class Experiment:
         for row in rows[context.rank::context.world]:
             values.append(dict(id=row['id'],language=row['language'],singer=row['singer'],ce=float(self.loss(row,suffix=suffix))))
             if shuffle: values[-1]['reversed_phone_ce']=float(self.loss(row,suffix=suffix,shuffle=True))
-        return validation_result(context.gather(values),[r['id'] for r in rows])
+        result=validation_result(context.gather(values),[r['id'] for r in rows])
+        result['loss_scope']='clean_suffix_teacher_forced' if suffix else 'clean_all_codebooks_teacher_forced'
+        return result
 
 
 def train(args):

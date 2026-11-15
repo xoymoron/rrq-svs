@@ -33,6 +33,8 @@ def token_metrics(codes):
 
 def validation_metrics(metrics, prefix='validation'):
     result = {f'{prefix}/language_macro_ce': metrics['language_macro_ce']}
+    if metrics.get('loss_scope'):
+        result[f'{prefix}/{metrics["loss_scope"]}_ce']=metrics['language_macro_ce']
     result.update({f'{prefix}/language/{language}/ce': value for language, value in metrics['per_language'].items()})
     for key in ('epoch', 'train_ce', 'seconds', 'mixture_draws'):
         if key in metrics:
@@ -116,6 +118,9 @@ def publish_evaluation(root, split, labels):
                                     'asr_text', 'asr_hit_length_cap', *keys])
         for label, rows in records.items():
             summary = summarize_rows(rows)
+            tracker.summary({f'{split}/{label}/diagnostics':{
+                'asr':summary['asr_diagnostics'],'per_language_asr':summary['per_language_asr'],
+                'per_language_counts':summary['per_language_counts'],'metric_support':summary['metric_support']}})
             tracker.log({f'{split}/{label}/{key}': value for key, value in summary['language_macro'].items() if value is not None})
             for language, metrics in summary['per_language'].items():
                 tracker.log({f'{split}/{label}/language/{language}/{key}': value for key, value in metrics.items() if value is not None})
