@@ -27,6 +27,13 @@ def test_split_is_order_invariant_groups_all_takes_and_covers_singers():
         assert {split[r['id']] for r in rows if r['singer']==singer}=={'train','valid','test'}
 
 
+def test_small_language_has_multiple_song_families_in_each_split():
+    rows=[item(j,'s',f'rare-language-song {j}') for j in range(18)]
+    families=build_families(rows,[]);split=assign_splits(rows,families,seed=17)
+    for part in ('train','valid','test'):
+        assert len({families[r['id']] for r in rows if split[r['id']]==part})>=3
+
+
 def test_alignment_does_not_stretch_or_silently_drop_long_utterances():
     r=item('a','s','song');r['phone_durations']=[15.,17.]
     got=prepare_row(r,dict(samplerate=44100,frames=32*44100,channels=1))

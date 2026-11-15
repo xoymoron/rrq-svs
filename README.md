@@ -25,7 +25,8 @@ are not stretched, normalized or truncated. Invalid records are explicitly
 reported; raw data remain intact. Exact PCM duplicates are collapsed after
 family union; identical PCM with conflicting conditioning is rejected and recorded. Normalized titles, explicit reviewed aliases (including translated
 versions), and exact PCM matches share one song family. Deterministic approximately
-80/10/10 family split retains each singer in train/valid/test. Unidentified
+80/10/10 family split retains each singer in train/valid/test, with at least
+three distinct song families per language in every split. Unidentified
 translations/arrangements remain a limitation; this is not a universal composition
 identity annotation. Vocabulary is train-only, with an explicit held-out UNK.
 

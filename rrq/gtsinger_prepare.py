@@ -53,23 +53,27 @@ def assign_splits(rows, families, seed=17):
     def order(g):return digest(f'gtsinger-family-v1:{seed}:{g}')
     assignment = {g:('test' if int(order(g)[:8],16)%100<10 else
                       'valid' if int(order(g)[:8],16)%100<20 else 'train') for g in groups}
-    singer_groups = defaultdict(set)
+    coverage = defaultdict(set)
     for group,items in groups.items():
-        for row in items:singer_groups[row['singer']].add(group)
-    if any(len(gs)<3 for gs in singer_groups.values()):
-        raise ValueError('each seen singer requires at least three distinct song families')
-    # Repair missing coverage, never splitting a family or removing a donor's last group.
-    for singer,gs in sorted(singer_groups.items()):
+        for row in items:
+            coverage[('singer',row['singer'])].add(group)
+            coverage[('language',row['language'])].add(group)
+    minimum={key:(3 if key[0]=='language' else 1) for key in coverage}
+    if any(len(gs)<3*minimum[key] for key,gs in coverage.items()):
+        raise ValueError('insufficient song families for singer and language split coverage')
+    affected={g:[key for key,gs in coverage.items() if g in gs] for g in groups}
+    # Preserve all donor constraints while repairing language and singer coverage.
+    for key,gs in sorted(coverage.items()):
         for split in ('train','valid','test'):
-            if any(assignment[g]==split for g in gs):continue
-            candidates=[]
-            for g in gs:
-                old=assignment[g]
-                affected={r['singer'] for r in groups[g]}
-                if all(sum(assignment[x]==old for x in singer_groups[s])>1 for s in affected):
-                    candidates.append(g)
-            if not candidates:raise ValueError('cannot preserve singer coverage without song leakage')
-            assignment[min(candidates,key=order)]=split
+            while sum(assignment[g]==split for g in gs)<minimum[key]:
+                candidates=[]
+                for g in gs:
+                    old=assignment[g]
+                    if old==split:continue
+                    if all(sum(assignment[x]==old for x in coverage[k])>minimum[k] for k in affected[g]):
+                        candidates.append(g)
+                if not candidates:raise ValueError('cannot preserve split coverage without song leakage')
+                assignment[min(candidates,key=order)]=split
     return {r['id']:assignment[families[r['id']]] for r in rows}
 
 
@@ -139,7 +143,8 @@ def main():
     rows=[json.loads(x) for x in Path(a.source).read_text(encoding='utf-8').splitlines() if x]
     aliases=json.loads(Path(a.aliases).read_text(encoding='utf-8'))['groups']
     config=dict(source_sha256=sha256(a.source),aliases_sha256=sha256(a.aliases),seed=a.seed,
-                policy='song-family-v1',audio_tolerance_seconds=.04,techniques=list(TECHNIQUES),
+                policy='song-family-v2',min_families_per_language_split=3,
+                audio_tolerance_seconds=.04,techniques=list(TECHNIQUES),
                 duplicate_policy='reject_conflicting_model_conditioning_v1',implementation_sha256=sha256(__file__))
     lock=out/'preprocess-config.json'
     if lock.exists() and json.loads(lock.read_text())!=config:raise ValueError('refuse overwrite with different preprocessing configuration')
@@ -169,7 +174,7 @@ def main():
     unique,duplicates,conflicting=deduplicate(valid);rejected.extend(conflicting)
     splits=assign_splits(unique,families,a.seed)
     for row in unique:
-        row.update(song_group=families[row['id']],split=splits[row['id']],split_policy='song-family-v1-seen-singer')
+        row.update(song_group=families[row['id']],split=splits[row['id']],split_policy='song-family-v2-seen-singer')
     text=''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in unique)
     path=out/'manifest.jsonl'
     if path.exists() and path.read_text(encoding='utf-8')!=text:raise ValueError('immutable prepared manifest changed')
