@@ -51,3 +51,15 @@ def test_conflicting_annotations_on_identical_pcm_are_not_arbitrarily_selected()
     b=deepcopy(a);b['id']='b'
     kept,duplicates,rejected=deduplicate([b,a])
     assert [r['id'] for r in kept]==['a'] and duplicates[0]['kept']=='a' and not rejected
+
+
+def test_duplicate_audit_ignores_score_metadata_not_used_as_conditioning():
+    from rrq.gtsinger_prepare import deduplicate
+    a=item('a','s','title');a['pcm_sha256']='same'
+    b=deepcopy(a);b['id']='b'
+    a['score']['ep_notedurs']=[.1,.2]
+    b['score']['ep_notedurs']=[.09,.21]
+    b['score']['ph2words']=[0,1]
+    kept,duplicates,rejected=deduplicate([b,a])
+    assert [r['id'] for r in kept]==['a'] and not rejected
+    assert duplicates==[dict(id='b',kept='a')]

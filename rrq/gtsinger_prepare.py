@@ -113,7 +113,12 @@ def deduplicate(rows):
     kept=[];duplicates=[];rejected=[]
     for group in groups.values():
         group=sorted(group,key=lambda r:r['id'])
-        conditions={json.dumps({k:r.get(k) for k in ('phones','phone_durations','score','techniques','singer','language')},sort_keys=True) for r in group}
+        conditions=set()
+        for row in group:
+            used={k:row.get(k) for k in ('phones','phone_durations','techniques','singer','language')}
+            # ep_notedurs/ep_types/ph2words are preserved metadata, not model inputs.
+            used['midi']=row['score'].get('ep_pitches',row['score'].get('notes'))
+            conditions.add(json.dumps(used,sort_keys=True))
         if len(conditions)>1:
             rejected.extend(dict(id=r['id'],reason='identical PCM has conflicting conditioning annotations',
                                  duplicate_ids=[x['id'] for x in group]) for r in group)
@@ -134,7 +139,8 @@ def main():
     rows=[json.loads(x) for x in Path(a.source).read_text(encoding='utf-8').splitlines() if x]
     aliases=json.loads(Path(a.aliases).read_text(encoding='utf-8'))['groups']
     config=dict(source_sha256=sha256(a.source),aliases_sha256=sha256(a.aliases),seed=a.seed,
-                policy='song-family-v1',audio_tolerance_seconds=.04,techniques=list(TECHNIQUES))
+                policy='song-family-v1',audio_tolerance_seconds=.04,techniques=list(TECHNIQUES),
+                duplicate_policy='reject_conflicting_model_conditioning_v1',implementation_sha256=sha256(__file__))
     lock=out/'preprocess-config.json'
     if lock.exists() and json.loads(lock.read_text())!=config:raise ValueError('refuse overwrite with different preprocessing configuration')
     write_json(lock,config)
