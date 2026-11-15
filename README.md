@@ -112,6 +112,28 @@ Isolated rrq.verify_runtime checks maximum source length, real score shapes,
 synthetic audio, three objectives, accumulation and two-GPU synchronization.
 It saves no research checkpoint and does not establish synthesis quality.
 
+After the protocol is frozen and readiness passes, one explicit launch can run
+the complete experiment in an existing tmux shell:
+
+```bash
+set -o pipefail
+../.venv-toksing/bin/python -u -m rrq.run_once --unlock-test-after-training \
+  2>&1 | tee ../logs/gtsinger-experiment.log
+```
+
+This runs common, gated targets, all three matched continuations, then one full
+test evaluation and W&B comparison publication. It stops on any failure; it does
+not retry, tune, change seeds or weaken gates. A lock rejects concurrent launch
+and an existing experiment record rejects a second fresh launch. Explicit
+`--resume` continues the same experiment and skips completed stages; checkpoint
+resume remains epoch-based. `experiment-state.json` records stage and completion.
+No test result is used to choose a checkpoint or configuration.
+
+Optional `rrq.profile_budget` measures bounded two-GPU throughput before launch,
+including validation and target-generation cost. It discards model weights and
+quality results, uses artificial branch labels for timing, and is not an SVS
+experiment. Its runtime estimate includes a margin and does not predict convergence.
+
 ## Reusable codec cache
 
 The matched runner stores native DAC tokens in `../data/toksing/dac-cache`, keyed
