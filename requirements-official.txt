@@ -1,0 +1,6 @@
+# Install after the existing CUDA torch/torchaudio; do not install ESPnet extras.
+typeguard==2.13.3
+humanfriendly==10.0
+encodec==0.1.1
+pyworld==0.3.5
+PyYAML>=6,<7

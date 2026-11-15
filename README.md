@@ -1,6 +1,52 @@
-# RRQ: GTSinger score-to-DAC experiment
+# RRQ with official TokSing: feasibility audit
 
-Current scope: GTSinger singing only; no AIHub audio. This is a TokSing-derived
+The previous custom DAC experiment is stopped. It is not an official TokSing
+baseline and its checkpoints cannot establish TokSing or RRQ performance.
+
+The `official-toksing-rrq` branch directly imports the clean ESPnet TokSing at
+`5f142ef90bf87ee0f4c2d6907f7a9462b3854316`. Its encoder, decoder, duration/F0
+predictors, continuous-LF0 enhancement, and supervised losses remain original.
+`rrq.official_toksing` adapts only input/output contracts and optionally the final
+projection's prefix conditioning. Disabled-adapter logits/loss match upstream;
+zero-initialized prefix embeddings preserve the original parallel projection.
+
+**This is an EnCodec adaptation, not an exact reproduction of the TokSing paper.**
+The new output is eight RVQ codebooks of frozen mono EnCodec24k at 6 kbps/75 Hz.
+The original paper's principal SSL-token + LF0 vocoder is replaced by native
+EnCodec decoding, without training a new vocoder. GTSinger's supplied phone
+timing defines the controlled acoustic task. Generation receives no target
+LF0, target tokens, or audio. The original duration predictor remains trained.
+
+`scripts/setup_official.sh` obtains the pinned dependency. Install the CUDA
+PyTorch stack first, then `requirements-toksing.txt` and `requirements-official.txt`.
+Set `ESPNET_ROOT` to that checkout and `TORCH_HOME` to the codec weight cache.
+
+```bash
+python -m rrq.official_pilot prepare --output artifacts/official-pilot
+python -m rrq.official_pilot profile --output artifacts/official-pilot
+torchrun --standalone --nproc_per_node=2 -m rrq.official_pilot train \
+    --output artifacts/official-pilot --mode parallel --arm baseline
+```
+
+This freezes 36 training and 18 held-out validation phrases, with equal
+language representation, for 64 short epochs (1,152 optimizer updates).
+It is a bounded fitting/generalization diagnostic, not a final experiment.
+Native codec roundtrip and reconstruction must pass before training. W&B
+records epoch losses, per-language waveform pitch/spectral metrics and all
+predetermined reference/codec/generated audition examples. Quality inference
+uses the predicted melody, never the teacher-forcing token shortcut.
+
+The separate `prefix` mode adds 2.75M parameters to the 73.31M official-config
+predictor. A matched continuation requires a fixed common prefix bank; all
+three arms load identical common weights, reset Adam and share sample/mask
+schedules. `targets` refuses a failed common synthesis audit. There is no
+automatic full-corpus launch; pitch/spectral success alone cannot prove lyric
+intelligibility or RRQ benefit. Source review and measured feasibility must
+precede a full experiment.
+
+## Historical custom DAC experiment (inactive)
+
+Historical scope: GTSinger singing only; no AIHub audio. This was a custom
 PyTorch score/length-regulation model with frozen DAC44k (9 RVQ codebooks), not
 an official TokSing reproduction or a pretrained zero-shot model.
 
