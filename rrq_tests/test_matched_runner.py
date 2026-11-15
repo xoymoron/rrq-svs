@@ -31,16 +31,15 @@ def make_experiment(tmp_path):
     config=tmp_path/'config.json';write_json(config,cfg)
     e=Experiment(prepared,tmp_path/'output',codec,config)
     for r in rows:
-        atomic_save(dict(id=r['id'],annotation_sha256=annotation_hash(r),source_sha256='fixture',
-                         codec_sha256=e.protocol['codec_sha256'],codes=torch.zeros(9,1,4,dtype=torch.int16),
-                         frame_index=torch.tensor([0,0,1,1],dtype=torch.int32),samples=2048,sample_rate=44100,hop=512),e.cache/(r['id']+'.pt'))
+        e.acoustic.put('fixture',dict(codes=torch.zeros(9,1,26,dtype=torch.int16),
+                                     samples=13230,sample_rate=44100,hop=512))
     write_json(e.root/'cache-complete.json',dict(protocol_sha256=e.hash,n=4))
     (e.root/'common').mkdir();torch.manual_seed(123)
     model=TokSingDAC(**model_config(e.vocab,cfg))
     atomic_save(dict(protocol_sha256=e.hash,arm='common',model=model.state_dict(),model_config=model.config),e.root/'common/best.pt')
     common_hash=sha256(e.root/'common/best.pt')
     for r in rows[:3]:
-        predicted=torch.ones(9,1,4,dtype=torch.int16);corrected=torch.full_like(predicted,2);corrected[0]=1
+        predicted=torch.ones(9,1,26,dtype=torch.int16);corrected=torch.full_like(predicted,2);corrected[0]=1
         atomic_save(dict(id=r['id'],predicted=predicted,corrected=corrected,common_sha256=common_hash,
                          protocol_sha256=e.hash,annotation_sha256=annotation_hash(r),source_sha256='fixture'),e.bank/(r['id']+'.pt'))
     write_json(e.root/'target-bank-complete.json',dict(protocol_sha256=e.hash,common_sha256=common_hash,oracle_room_detected=True))
@@ -113,7 +112,7 @@ def test_resumed_cache_still_reports_reconstruction_on_validation_only(tmp_path,
     import numpy as np
     e=make_experiment(tmp_path)
     for row in e.rows:row['audio']='fixture.wav'
-    audio=np.sin(np.arange(2048)*2*np.pi*220/44100).astype(np.float32)
+    audio=np.sin(np.arange(13230)*2*np.pi*220/44100).astype(np.float32)
     codec=SimpleNamespace(sample_rate=44100,decode=lambda codes,samples:torch.from_numpy(audio)[None,None])
     monkeypatch.setattr(runner,'FrozenDAC',lambda *a:codec)
     monkeypatch.setattr(runner,'sha256',lambda path:'fixture')
@@ -123,3 +122,26 @@ def test_resumed_cache_still_reports_reconstruction_on_validation_only(tmp_path,
     assert [r['id'] for r in report['samples']]==['item-2']
     assert report['language_macro']['codec']['mrstft_spectral_convergence']==0
     assert report['protocol_sha256']==e.hash
+    completion=json.loads((e.root/'cache-complete.json').read_text())
+    assert completion['acoustic_encoded']==0 and completion['acoustic_reused']==4
+    assert report['clean_prefix_audited_samples']==0
+
+
+def test_revised_split_and_duration_reuse_tokens_but_reject_old_target_bank(tmp_path):
+    e=make_experiment(tmp_path);original=e.read_cache(e.by_id['item-0'])
+    acoustic_sha=sha256(e.acoustic.path('fixture'))
+    revised=tmp_path/'revised';shutil.copytree(e.prepared,revised)
+    rows=e.rows
+    rows[0]['split']='valid';rows[2]['split']='train';rows[0]['phone_durations']=[.2,.1]
+    manifest=revised/'manifest.jsonl';manifest.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+    write_json(revised/'panels.json',dict(train=['item-2'],valid=['item-0']))
+    write_json(revised/'audit.json',dict(manifest_sha256=sha256(manifest),config={}))
+    new=Experiment(revised,tmp_path/'revised-output',e.codec,tmp_path/'config.json')
+    changed=new.read_cache(new.by_id['item-0'])
+    assert torch.equal(changed['codes'],original['codes'])
+    assert not torch.equal(changed['frame_index'],original['frame_index'])
+    assert sha256(new.acoustic.path('fixture'))==acoustic_sha
+    assert new.hash!=e.hash
+    shutil.copyfile(e.bank/'item-0.pt',new.bank/'item-0.pt')
+    with pytest.raises(ValueError,match='target bank provenance'):
+        new.read_bank(new.by_id['item-0'],sha256(e.root/'common/best.pt'))

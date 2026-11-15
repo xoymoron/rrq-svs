@@ -102,7 +102,7 @@ bash run_matched.sh valid
 bash run_matched.sh final-test --unlock-test
 ```
 
-Training has epoch/batch tqdm and W&B group gtsinger-rrq-v1 with separate arm
+Training has epoch/batch tqdm and W&B group gtsinger-rrq-v2 with separate arm
 runs. Resume restores model+optimizer and deterministic epoch RNG; incomplete
 epochs are replayed. The committed last checkpoint contains a recoverable best
 snapshot; best.pt/report writes precede the epoch commit. No optimizer tensors
@@ -111,6 +111,47 @@ are loaded onto a GPU for inference.
 Isolated rrq.verify_runtime checks maximum source length, real score shapes,
 synthetic audio, three objectives, accumulation and two-GPU synchronization.
 It saves no research checkpoint and does not establish synthesis quality.
+
+## Reusable codec cache
+
+The matched runner stores native DAC tokens in `../data/toksing/dac-cache`, keyed
+only by source audio SHA256, codec checkpoint SHA256, and the audio encoding
+implementation/runtime contract. Split, annotations, sample ID, and training
+configuration do not belong to this key. Each experiment stores its small
+`alignment-cache` separately; a split-only change reuses alignment too, while
+changed phone duration/pitch/phones rebuild it. Singer/language/technique values
+are read from the current manifest at each batch. Invalid alignment fails
+without deleting or overwriting the audio tokens.
+
+Existing `artifacts/gtsinger-rrq-v1/cache` files remain untouched. Promote them
+without loading DAC or encoding audio:
+
+```bash
+../.venv-toksing/bin/python -m rrq.migrate_codec_cache \
+  --legacy-output artifacts/gtsinger-rrq-v1 \
+  --manifest ../data/toksing/gtsinger-prepared/manifest.jsonl \
+  --codec ../data/toksing/dac44k.pth \
+  --acoustic-cache ../data/toksing/dac-cache \
+  --report artifacts/acoustic-cache-migration.json
+```
+
+Migration checks the legacy codec, manifest, encoding source and package versions,
+compares every token exactly, and verifies every old file stayed byte-identical.
+The new default output is `artifacts/gtsinger-rrq-v2`; do not overwrite the old
+immutable protocol. For a future prepared split/annotation revision:
+
+```bash
+PREPARED=/path/to/revised-prepared OUTPUT=artifacts/revised-split bash run_matched.sh cache
+```
+
+`ACOUSTIC_CACHE` can override the shared directory. The completion report counts
+`acoustic_encoded`, `acoustic_reused`, and `alignments_rebuilt`. Native token reuse
+does not make a stale checkpoint or RRQ target bank valid: these still bind the
+complete annotation/split protocol. RRQ target construction needs a continuous
+target latent, so that separate stage still runs the encoder; FP32 latents are
+not retained in the token store. Codec reconstruction uses the decoder only
+when native tokens already exist. A new validation panel may have fewer stored
+clean-prefix audits; audited sample count is explicit, never assumed complete.
 
 ## Historical evidence and boundaries
 

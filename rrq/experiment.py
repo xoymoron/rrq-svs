@@ -13,6 +13,7 @@ import torch
 from .io import sha256, write_json
 from .toksing_data import read_rows, inventory, annotation_hash
 from .toksing_run import atomic_save
+from .cache_store import AcousticCache, AlignmentCache
 
 
 def fingerprint(value):
@@ -45,7 +46,7 @@ def model_config(vocab,config):
 
 
 class Experiment:
-    def __init__(self,prepared,output,codec,config):
+    def __init__(self,prepared,output,codec,config,acoustic_cache=None):
         self.prepared=Path(prepared).resolve();self.root=Path(output).resolve();self.root.mkdir(parents=True,exist_ok=True)
         self.codec=Path(codec).resolve();self.config=json.loads(Path(config).read_text(encoding='utf-8'))
         self.manifest=self.prepared/'manifest.jsonl';self.rows=read_rows(self.manifest)
@@ -67,13 +68,16 @@ class Experiment:
         for split in ('valid','test'):
             held=[r for r in self.rows if r['split']==split]
             if not {r['singer'] for r in held}<=set(self.vocab['singers']):raise ValueError('unseen singer in seen-singer protocol')
-        self.protocol=dict(version=1,manifest_sha256=sha256(self.manifest),codec_sha256=sha256(self.codec),
+        self.acoustic=AcousticCache(acoustic_cache or self.prepared.parent/'dac-cache',sha256(self.codec))
+        self.alignment=AlignmentCache(self.root/'alignment-cache')
+        self.protocol=dict(version=2,manifest_sha256=sha256(self.manifest),codec_sha256=sha256(self.codec),
+            encoding_contract_sha256=self.acoustic.contract_sha256,
             config=self.config,vocabulary_sha256=fingerprint(self.vocab),panels_sha256=fingerprint(self.panels),
             preprocess_config=audit['config'],conditioning='provided phone duration, MIDI pitch, singer, language, six technique flags',
             prefix='offline frozen common-model greedy first codebook; all arms self-generate at primary evaluation',
             selection='fixed validation panel language-macro free-running MRSTFT spectral convergence')
         self.protocol['implementation']={name:sha256(Path(__file__).parent/name) for name in
-            ('experiment.py','matched_run.py','toksing_model.py','toksing_data.py','targets.py','core.py','dac_codec.py','metrics.py','distributed.py','toksing_run.py','tracking.py','io.py')}
+            ('experiment.py','matched_run.py','cache_store.py','toksing_model.py','toksing_data.py','targets.py','core.py','dac_codec.py','metrics.py','distributed.py','toksing_run.py','tracking.py','io.py')}
         self.protocol['environment']=dict(python=platform.python_version(),cuda=torch.version.cuda,
             cudnn=torch.backends.cudnn.version(),packages={name:importlib.metadata.version(name) for name in
                 ('torch','torchaudio','numpy','scipy','soundfile','descript-audio-codec')})
@@ -85,15 +89,13 @@ class Experiment:
         import os
         if int(os.environ.get('RANK','0'))==0:
             write_json(lock,self.protocol);write_json(self.root/'vocabulary.json',self.vocab)
-        self.cache=self.root/'cache';self.cache.mkdir(exist_ok=True)
         self.bank=self.root/'target-bank';self.bank.mkdir(exist_ok=True)
 
     def read_cache(self,row,device='cpu'):
-        c=torch.load(self.cache/(row['id']+'.pt'),map_location=device,weights_only=True)
-        if (c['id']!=row['id'] or c['annotation_sha256']!=annotation_hash(row) or
-            c['source_sha256']!=row['source_sha256'] or c['codec_sha256']!=self.protocol['codec_sha256']):
-            raise ValueError('cache provenance mismatch: '+row['id'])
-        c['codes']=c['codes'].long();c['frame_index']=c['frame_index'].long()
+        c=self.acoustic.read(row['source_sha256'])
+        index,rebuilt=self.alignment.read(row,c)
+        c.update(id=row['id'],frame_index=index.to(device),alignment_rebuilt=rebuilt)
+        c['codes']=c['codes'].long().to(device)
         return c
 
     def read_bank(self,row,common_hash,device='cpu'):

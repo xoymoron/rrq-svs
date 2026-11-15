@@ -8,9 +8,10 @@ STAGE="${1:?Choose cache, readiness, common, targets, branches, valid, or final-
 shift
 export CUDA_VISIBLE_DEVICES=0,1
 export OMP_NUM_THREADS=2
-PREPARED="$SVS_ROOT/data/toksing/gtsinger-prepared"
-OUTPUT="artifacts/gtsinger-rrq-v1"
-ARGS=(--prepared "$PREPARED" --output "$OUTPUT" --codec "$SVS_ROOT/data/toksing/dac44k.pth" --config config/gtsinger-rrq-v1.json)
+PREPARED="${PREPARED:-$SVS_ROOT/data/toksing/gtsinger-prepared}"
+OUTPUT="${OUTPUT:-artifacts/gtsinger-rrq-v2}"
+ACOUSTIC_CACHE="${ACOUSTIC_CACHE:-$SVS_ROOT/data/toksing/dac-cache}"
+ARGS=(--prepared "$PREPARED" --output "$OUTPUT" --acoustic-cache "$ACOUSTIC_CACHE" --codec "$SVS_ROOT/data/toksing/dac44k.pth" --config config/gtsinger-rrq-v1.json)
 run() { "$PYTHON" -m torch.distributed.run --standalone --nproc_per_node=2 -m rrq.matched_run "$@" "${ARGS[@]}"; }
 case "$STAGE" in
   cache|readiness) unset WANDB_PROJECT WANDB_ENTITY; run "$STAGE" ;;

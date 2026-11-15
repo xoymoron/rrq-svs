@@ -40,20 +40,17 @@ def cache_stage(e,d,device):
     codec=FrozenDAC(e.codec,device);records=[];reconstruction=[]
     for row in tqdm(shard(e.rows,d.rank,d.world),desc=f'codec cache GPU{d.rank}',mininterval=2):
         if sha256(row['audio'])!=row['source_sha256']:raise ValueError('source changed after preparation')
-        path=e.cache/(row['id']+'.pt')
-        if path.exists():
-            c=e.read_cache(row)
-        else:
+        encoded=not e.acoustic.path(row['source_sha256']).exists()
+        if encoded:
             x=load_audio(row['audio'],codec.sample_rate)
             z,codes=codec.encode(torch.from_numpy(x)[None,None].to(device))
-            cond=frame_condition(row,z.shape[-1],len(x),codec.sample_rate,codec.hop)
             audit=clean_prefix_audit(z,codes,codec.layers) if row['id'] in e.panels['valid'] else None
-            c=dict(id=row['id'],codes=codes.cpu().short(),
-                frame_index=torch.from_numpy(cond['phone_index']).int(),samples=len(x),sample_rate=codec.sample_rate,
-                hop=codec.hop,codec_sha256=codec.fingerprint,source_sha256=row['source_sha256'],
-                annotation_sha256=annotation_hash(row),clean_prefix_audit=audit)
-            atomic_save(c,path)
-        records.append(dict(id=row['id'],frames=c['codes'].shape[-1]))
+            e.acoustic.put(row['source_sha256'],dict(codes=codes.cpu().short(),samples=len(x),
+                sample_rate=codec.sample_rate,hop=codec.hop,clean_prefix_audit=audit,
+                clean_prefix_audit_recipe=e.acoustic.audit_recipe))
+        c=e.read_cache(row)
+        records.append(dict(id=row['id'],frames=c['codes'].shape[-1],encoded=encoded,
+                            alignment_rebuilt=c['alignment_rebuilt']))
         if row['id'] in e.panels['valid']:
             x=load_audio(row['audio'],codec.sample_rate)
             y=codec.decode(c['codes'].to(device).long(),c['samples'])[0,0].cpu().numpy()
@@ -66,8 +63,11 @@ def cache_stage(e,d,device):
     if {r['id'] for r in reconstruction}!=set(e.panels['valid']):raise ValueError('reconstruction panel mismatch')
     if d.primary:
         report=summary(reconstruction);report['protocol_sha256']=e.hash
+        report['clean_prefix_audited_samples']=sum(r['clean_prefix_audit'] is not None for r in reconstruction)
         write_json(e.root/'codec-reconstruction.json',report)
         write_json(e.root/'cache-complete.json',dict(protocol_sha256=e.hash,n=len(records),
+            acoustic_encoded=sum(r['encoded'] for r in records),acoustic_reused=sum(not r['encoded'] for r in records),
+            alignments_rebuilt=sum(r['alignment_rebuilt'] for r in records),acoustic_cache=str(e.acoustic.root),
             total_frames=sum(r['frames'] for r in records),max_frames=max(r['frames'] for r in records),
             latent_storage='none; exact FP32 target latent recomputed for targets/evaluation'))
 
@@ -197,6 +197,7 @@ def log_validation(run,report,epoch,folder=None):
     for lang in report['per_language']:
         values.update({f'valid/{lang}/tokens/{k}':v for k,v in mean_maps([r['tokens'] for r in report['samples'] if r['language']==lang]).items()})
     values['codec/clean_prefix_rounding_changes']=sum((r.get('clean_prefix_audit') or {}).get('changed_tokens',0) for r in report['samples'])
+    values['codec/clean_prefix_audited_samples']=sum(r.get('clean_prefix_audit') is not None for r in report['samples'])
     run.log(values)
     if folder:
         for lang in sorted(report['per_language']):
@@ -363,6 +364,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('stage',choices=['cache','common','targets','branch','evaluate','readiness'])
     p.add_argument('--prepared',required=True);p.add_argument('--output',required=True);p.add_argument('--codec',required=True)
+    p.add_argument('--acoustic-cache',help='Shared native token store; default: PREPARED/../dac-cache')
     p.add_argument('--config',default='config/gtsinger-rrq-v1.json');p.add_argument('--arm',choices=['baseline','exposure','rrq'],default='baseline')
     p.add_argument('--split',choices=['valid','test'],default='valid');p.add_argument('--unlock-test',action='store_true')
     a=p.parse_args();torch.set_num_threads(2)
@@ -372,7 +374,7 @@ def main():
     torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
     d=Distributed();d.start();device=torch.device(f'cuda:{d.local_rank}' if torch.cuda.is_available() else 'cpu')
     try:
-        e=Experiment(a.prepared,a.output,a.codec,a.config);d.barrier()
+        e=Experiment(a.prepared,a.output,a.codec,a.config,a.acoustic_cache);d.barrier()
         if a.stage=='cache':cache_stage(e,d,device)
         elif a.stage=='targets':targets_stage(e,d,device)
         elif a.stage in ('common','branch'):train_stage(e,d,device,'common' if a.stage=='common' else a.arm)
