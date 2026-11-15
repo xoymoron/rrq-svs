@@ -60,11 +60,14 @@ def cache_stage(e,d,device):
 
 
 def targets_stage(e,d,device):
-    e.require_cache();checkpoint=e.root/'common/best.pt';state=e.checkpoint(checkpoint,device)
+    e.require_cache();checkpoint=e.root/'common/best.pt';state=e.checkpoint(checkpoint)
     gate=json.loads((e.root/'common/quality-gate.json').read_text())
+    if gate['protocol_sha256']!=e.hash or gate['common_sha256']!=sha256(checkpoint):raise ValueError('stale common quality gate')
     if not gate['passed']:raise ValueError('Common baseline failed the declared feasibility gate; review before running RRQ branches')
+    if state['arm']!='common':raise ValueError('prefix predictor must be the common model')
     common_hash=sha256(checkpoint);model=TokSingDAC(**state['model_config']).to(device)
     model.load_state_dict(state['model']);model.eval().requires_grad_(False)
+    del state
     codec=FrozenDAC(e.codec,device)
     selected=e.train+[e.by_id[i] for i in e.panels['valid']]
     records=[];oracle_samples=[]
@@ -196,20 +199,27 @@ def train_stage(e,d,device,arm):
     model=TokSingDAC(**mc).to(device)
     init_hash=None
     if arm!='common':
-        common=e.checkpoint(e.root/'common/best.pt',device)
+        common=e.checkpoint(e.root/'common/best.pt')
         model.load_state_dict(common['model']);init_hash=common_hash
         del common
     wrapped=d.wrap(model)
     optimizer=torch.optim.AdamW(model.parameters(),lr=cfg['learning_rate'],weight_decay=cfg['weight_decay'])
     epochs=cfg['common_epochs'] if arm=='common' else cfg['branch_epochs']
-    first=1;step=0;best=float('inf')
+    first=1;step=0;best=float('inf');best_state=None
     if (out/'last.pt').exists():
-        value=e.checkpoint(out/'last.pt',device)
+        value=e.checkpoint(out/'last.pt')
         if value['arm']!=arm or value['initial_checkpoint_sha256']!=init_hash:raise ValueError('resume arm/initialization mismatch')
         model.load_state_dict(value['model']);optimizer.load_state_dict(value['optimizer'])
         first=value['epoch']+1;step=value['step'];best=value['best']
+        best_state=value['best_state']
+        if d.primary and (not (out/'best.pt').exists() or sha256(out/'best.pt')!=value['best_checkpoint_sha256']):
+            # last.pt is the epoch commit record; recover an interrupted best-file update.
+            atomic_save(best_state,out/'best.pt')
+        del value
     codec=FrozenDAC(e.codec,device)
-    run=tracker(out,'training',dict(e.protocol,arm=arm,initial_checkpoint_sha256=init_hash)) if d.primary else None
+    run=tracker(out,'training',dict(e.protocol,arm=arm,experiment_name=e.root.name,
+                                  initial_checkpoint_sha256=init_hash)) if d.primary else None
+    if run and first>1:run.log({'resume/from_epoch':first-1,'resume/optimizer_step':step})
     if first==1:
         # Same untouched initial weights, same validation panel, no optimization.
         initial=evaluate_panel(e,d,device,model,codec,e.panels['valid'],common_hash,ablate=True)
@@ -266,12 +276,17 @@ def train_stage(e,d,device,arm):
             state=dict(protocol_sha256=e.hash,arm=arm,initial_checkpoint_sha256=init_hash,
                 model_config=mc,model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,
                 step=step,best=best,parameter_sha256=synced,schedule_sha256=fingerprint(draws))
-            atomic_save(state,out/'last.pt')
-            if improved:atomic_save(state,out/'best.pt')
+            if improved:
+                best_state={k:v for k,v in state.items() if k not in ('optimizer','model')}
+                best_state['model']={k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+                atomic_save(best_state,out/'best.pt')
             report.update(epoch=epoch,step=step,selection_score=score,train=mean_maps(train_stats),
                 seconds=time.time()-started,parameter_sha256=synced,schedule_sha256=fingerprint(draws),
                 shared_predicted_mixture_sha256=fingerprint([mixture_choice(cfg['seed'],epoch,i,cfg['predicted_prefix_probability']) for i in range(len(draws))]))
             write_json(out/f'epoch-{epoch:03d}.json',report)
+            # All artifacts needed by this committed epoch exist before publishing last.
+            state.update(best_state=best_state,best_checkpoint_sha256=sha256(out/'best.pt'))
+            atomic_save(state,out/'last.pt')
             print(json.dumps(dict(arm=arm,epoch=epoch,step=step,selection_score=score,seconds=report['seconds'])),flush=True)
             log_validation(run,report,epoch,audio_folder)
         d.barrier()
@@ -288,8 +303,10 @@ def train_stage(e,d,device,arm):
 def evaluate_stage(e,d,device,arm,split,unlock_test):
     if split=='test' and not unlock_test:raise ValueError('test evaluation requires explicit --unlock-test after protocol freeze')
     e.require_cache();common_hash=e.require_bank() if arm!='common' else None
-    checkpoint=e.root/arm/'best.pt';state=e.checkpoint(checkpoint,device)
+    checkpoint=e.root/arm/'best.pt';state=e.checkpoint(checkpoint)
+    if state['arm']!=arm:raise ValueError('checkpoint arm mismatch')
     model=TokSingDAC(**state['model_config']).to(device);model.load_state_dict(state['model']);model.eval()
+    del state
     codec=FrozenDAC(e.codec,device)
     ids=sorted(r['id'] for r in e.rows if r['split']==split)
     # Full held-out evaluation is primary free-running only. Banks never contain test targets.

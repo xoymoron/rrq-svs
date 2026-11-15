@@ -1,123 +1,133 @@
-# RRQ: TokSing-derived score-to-DAC singing diagnostics
+# RRQ: GTSinger score-to-DAC experiment
 
-This branch replaces Prompt-Singer with a TokSing-derived score encoder,
-length regulator, shared temporal decoder and depth-conditional RVQ head.
-It is a PyTorch reimplementation, not a reproduction of the original TokSing
-SSL+LF0 vocoder. DAC44k is frozen. Existing rrq.core.requantize, make_arms,
-metrics and targets.training_map are reused.
+Current scope: GTSinger singing only; no AIHub audio. This is a TokSing-derived
+PyTorch score/length-regulation model with frozen DAC44k (9 RVQ codebooks), not
+an official TokSing reproduction or a pretrained zero-shot model.
 
-## Scope
+Inputs are phonemes, MIDI note pitch, supplied phoneme durations, singer,
+language, and the six supplied per-phoneme technique flags. Duration and
+technique are explicit user controls/annotations, not predictions. No target
+waveform, latent, extracted F0 or target codec suffix enters primary generation.
+Original TokSing's SSL+LF0 vocoder and melody enhancement are not claimed here.
 
-Inputs: phonemes, MIDI note pitch, provided phoneme durations, singer/language.
-The first mechanism experiment is annotation-conditioned, seen-singer SVS.
-No target waveform, latent or extracted F0 enters model.generate. Annotation
-inventory includes all supplied symbols (transductive). Original TokSing's
-melody-enhancement and learned duration paths are not claimed reproduced.
+## Data and split
 
-1. Encode/decode real singing through frozen DAC; measure reconstruction.
-2. Train score-to-RVQ predictor; select by language-macro validation CE.
-3. Generate real greedy codec predictions from score only.
-4. Decode clean codec, full prediction, predicted first codebook + original
-   suffix (exposure oracle), and predicted first codebook + RRQ suffix.
+The pinned GTSinger source revision is4426c862beed558b7e1cb8a4dce7e8c0c83bb208.
+All28628 singing WAVs and original JSON/TextGrid/MusicXML are acquired;
+Speech takes are excluded. No singer/language/duration cap is used at acquisition.
+Git/LFS batch transfer avoids per-file resolver throttling; rrq.gtsinger_git
+verifies original Git/LFS hashes before materializing the complete inventory.
+Acquisition is background-only, without W&B or a download tmux dashboard.
 
-Oracle suffixes access target audio: not learned RRQ performance, and greedy
-RRQ is not a global upper bound. DAC's normalized lookup AND full-dimensional
-output projection are retained. Codec clock is44100/512Hz, not the old50Hz.
-Only codec endpoint padding is cropped; no time stretch or gain normalization.
+rrq.gtsinger_prepare checks finite mono PCM, nonzero energy, sample clock,
+MIDI/phoneme correspondence, and binary technique flags. Original recordings
+are not stretched, normalized or truncated. Invalid records are explicitly
+reported; raw data remain intact. Exact PCM duplicates are collapsed after
+family union. Normalized titles, explicit reviewed aliases (including translated
+versions), and exact PCM matches share one song family. Deterministic approximately
+80/10/10 family split retains each singer in train/valid/test. Unidentified
+translations/arrangements remain a limitation; this is not a universal composition
+identity annotation. Vocabulary is train-only, with an explicit held-out UNK.
 
-## Server execution
+Test model evaluation is locked. Deterministic source validation/codec caching
+may read test audio; no test metrics select a model or hyperparameters.
 
-Repository ~/SVS/rrq-svs; fresh environment ~/SVS/.venv-toksing, Python3.10.
-Install matching torch/torchaudio2.6.0 CUDA12.4, then:
+## Matched experiment
+
+Common warmup:20 epochs. Each continuation:10 epochs, same common best weights,
+reset AdamW, seed17, sample schedule, gradient accumulation and optimizer budget.
+Two3090s, batch1/GPU, accumulation4, effective batch8. Language sampling is
+uniform except Chinese weight0.25 (about3.03% of draws); singer/phrase sampling
+is uniform within the selected language, with replacement. Raw Chinese data
+are retained. An epoch is a fixed number of weighted draws, not an exhaustive pass.
+
+|Arm|Selected-prefix input|Suffix supervision and teacher-forced suffix context|
+|---|---|---|
+|baseline|Native target prefix|Native codec tokens|
+|exposure|Frozen common-model predicted q0 on50% of draws|Native codec tokens|
+|RRQ|Same frozen predicted q0 and same50% mask|Native residual re-quantization against that prefix|
+
+The first-codebook supervision is always the original native target. Predicted
+q0 is never used as its own label. On frames where predicted q0 equals native
+q0, native suffix labels remain unchanged, isolating DAC STE rounding artifacts.
+The shared frozen bank is built from train data and the fixed validation panel,
+never test data. Train prefixes are in-sample, not out-of-fold predictions.
+
+Exposure vs RRQ tests the complete re-quantized training map: both suffix labels
+and their subsequent teacher-forced context change. It does not isolate label
+changes while holding every later context token fixed.
+
+Primary inference self-generates all9 codebooks. A frozen-common-prefix decode
+is diagnostic only. Prefix-bank agreement measures drift after continuation;
+fixed-prefix-only improvement cannot establish better ordinary generation.
+
+All checkpoints use the same fixed72-phrase validation panel (8/language), chosen
+before model outputs and balanced across singers. Selection is language-macro
+free-running MRSTFT spectral convergence, never arm-specific target CE. Per-language
+F0/voicing/support, latent MSE, token diversity, phone/note condition ablations,
+and fixed audio examples are logged. These are diagnostics, not MOS or proof
+of lyric intelligibility. Final evaluation uses the full held-out split and
+paired song-family bootstrap; one-seed CI does not represent seed variability.
+
+Before branch training, operational gates require common-model generation and
+condition-use improvement, then matched oracle room on the validation panel.
+Thresholds are predeclared heuristics, not statistical/perceptual certificates.
+If either fails, stop and review rather than automatically lengthening training.
+Seeds29/43 are planned replications after seed17 feasibility, not completed runs.
+
+## Server commands (stages do not run automatically)
+
+Repository:~/SVS/rrq-svs. Environment:~/SVS/.venv-toksing (Python3.10,
+torch/torchaudio2.6.0 CUDA12.4, DAC1.0.0). All current source/package versions,
+manifest, aliases, codec, panels and training configuration are bound to protocol.
 
 ```bash
-~/SVS/.venv-toksing/bin/pip install -r requirements-toksing.txt
-~/SVS/.venv-toksing/bin/python -m pytest
-# In the svs-toksing diagnostic tmux window:
 cd ~/SVS/rrq-svs
-bash run_toksing.sh /path/to/reviewed-manifest.jsonl artifacts/new-experiment 2>&1 | tee ~/SVS/logs/toksing-diagnostic.log
-# Attach from another terminal:
-tmux attach -t svs-toksing
+# After verified full acquisition:
+../.venv-toksing/bin/python -m rrq.gtsinger_prepare \
+  --source ../data/toksing/gtsinger-full.jsonl --root ../data/gtsinger \
+  --output ../data/toksing/gtsinger-prepared --aliases config/gtsinger-song-aliases.json
+bash run_matched.sh cache
+bash run_matched.sh readiness
+# Start actual training ONLY when requested, inside tmux:
+tmux new-session -s svs-train -c ~/SVS/rrq-svs
+bash run_matched.sh common 2>&1 | tee ../logs/gtsinger-common.log
+# Review common quality gate before these stages:
+bash run_matched.sh targets
+bash run_matched.sh branches 2>&1 | tee ../logs/gtsinger-branches.log
+bash run_matched.sh valid
+# After freezing the protocol/model choices:
+bash run_matched.sh final-test --unlock-test
 ```
 
-Both3090s are used: DDP training and disjoint cache/evaluation shards. Epoch
-progress, per-language CE/coarse accuracy/phone-reversal gap, local JSON and
-W&B metrics/audio are recorded. Global training sampling is language-uniform
-with replacement; validation visits each phrase exactly once. best.pt/last.pt
-are tied to manifest and codec hashes. Cache also verifies audio/annotations.
-Train cache stores tokens; validation retains exact FP32 latents for oracle.
-F0/voicing/MRSTFT are diagnostics, not MOS or proof of intelligibility.
+Training has epoch/batch tqdm and W&B group gtsinger-rrq-v1 with separate arm
+runs. Resume restores model+optimizer and deterministic epoch RNG; incomplete
+epochs are replayed. The committed last checkpoint contains a recoverable best
+snapshot; best.pt/report writes precede the epoch commit. No optimizer tensors
+are loaded onto a GPU for inference.
 
-The initial small-data mechanism diagnostic is complete. Its metrics are
-historical evidence, not a multilingual SVS quality claim. Acquisition now
-retains every original singing asset in all nine GTSinger languages, including
-WAV, JSON, TextGrid and MusicXML. Speech takes are excluded. There is no singer,
-duration or language cap at acquisition. Chinese minimization is a future
-training-sampling policy, not deletion from the source collection.
+Isolated rrq.verify_runtime checks maximum source length, real score shapes,
+synthetic audio, three objectives, accumulation and two-GPU synchronization.
+It saves no research checkpoint and does not establish synthesis quality.
 
-```bash
-~/SVS/.venv-toksing/bin/python -m rrq.toksing_acquire --root ~/SVS/data/gtsinger --output ~/SVS/data/toksing/gtsinger-full.jsonl --workers 8
-```
+## Historical evidence and boundaries
 
-The pinned source tree, source sizes and available official LFS SHA256 hashes
-are checked. Existing verified raw files are reused. Download status is local
-only; W&B and visible tmux/epoch tqdm are reserved for training. The acquisition
-process runs detached with a log and PID file. source-inventory.json and
-download-status.json retain local counts and failures. Raw acquisition never
-depends on training annotation eligibility.
-The metadata manifest is an inventory, not a finalized training split.
-Title groups, translation aliases and cross-corpus song identity still need audit.
+The retired77-minute training pilot had only3.3% coarse-code accuracy.
+Its50-phrase oracle MRSTFT-SC0.9772→0.3376 supports testing the mechanism, not
+learnability or a strong multilingual baseline. Old diagnostics are consolidated
+in server logs/toksing-initial-diagnostic-history.json. Prompt-Singer source is
+recoverable at commit00e364e; its source/env/checkpoints are retired.
 
-Current training corpus: GTSinger singing only. At the user's request, AIHub
-audio acquisition was stopped before completion. Labels are available, but no
-complete AIHub audio corpus is claimed or included in training. The optional
-AIHub473 adapter remains available for future use.
+AIHub473 audio acquisition was stopped by user request; completed label archives
+are not a complete training corpus. The optional adapter remains unused.
 
-AIHub dataset473 (next-tone guide vocals) has four accessible archives
-TL1/TS1/VL1/VS1 (file keys34217-34220). The portal reports92 singers and
-157.39h; the actual accessible labels contain3609 recordings and141.87h of
-voice_duration. Do not substitute the advertised number for the measured one.
-Note timestamps are NOT phoneme alignments. Breath flags override placeholder
-MIDI96/84. Overlapping annotation segments are reported, not silently repaired.
-The preprocessor defaults to all singers with no duration cap; segmentation and
-annotation quality checks are separate from preservation of all source archives.
-
-rrq.acquisition_watch observes the official AIHub downloader PID, publishes byte
-growth/rounded-size progress to tqdm and W&B, then checks all ZIP CRCs and
-label/audio filename coverage after download/merging exits. A size estimate or
-an existing ZIP filename alone never counts as successful acquisition.
-
-Implementation status: frozen DAC, score predictor, DDP diagnostic training,
-reconstruction and actual-predicted-prefix RRQ oracle work. The new backbone's
-learned exposure/RRQ training arms are not yet connected to the runner; final
-multilingual preprocessing/splits and matched training remain future work.
-The earlier50-phrase diagnostic gave language-macro MRSTFT-SC0.9772 for original
-suffix vs0.3376 for RRQ oracle suffix. First-codebook prediction accuracy was
-only3.3%; this is a weak-model mechanism test, not evidence of learned RRQ gains.
-
-## Migration review and history
-
-Legacy source is recoverable at commit00e364edd4cf79cfcf8122efe0815b6e76ebd790.
-Before replacement its tests passed92 with one Linux-only skip. The important
-safeguards survive: native quantization, frame clocks, exact validation coverage,
-language-macro reporting, matched conditions, no oracle-as-generation claim.
-Fairseq/T5/SoundStream/CodeBigVGAN source and launch paths are retired. Raw data
-are not cleanup targets. Old checkpoints/environment are removed only after
-compact historical metrics are preserved and the new environment works.
-
-Old Prompt-Singer pilot:472train/50valid/54test,77.44train minutes, eight primary
-languages. Generated multilingual intelligibility was poor. Stored latent
-oracle MSE9.977146 ->6.257880 on50/50 validation phrases, versus clean.771707.
-This did not establish learned RRQ gains. DAC results must be reported anew.
-
-## Sources and licenses
+## Primary sources
 
 - TokSing: https://arxiv.org/abs/2406.08416
-- Architecture reference: https://github.com/espnet/espnet/blob/master/espnet2/svs/discrete/toksing.py
-- DAC: https://github.com/descriptinc/descript-audio-codec (package1.0.0)
+- Original implementation: https://github.com/espnet/espnet/blob/master/espnet2/svs/discrete/toksing.py
+- DAC: https://github.com/descriptinc/descript-audio-codec
 - GTSinger: https://arxiv.org/abs/2409.13832
-- AIHub473: https://aihub.or.kr/aihubdata/data/view.do?dataSetSn=473
-- Historical Prompt-Singer: https://github.com/cyanbx/Prompt-Singer
+- Related correction precedent (not proof for SVS): https://arxiv.org/abs/2412.04431
 
 Original repository MIT license retained. No ESPnet source is redistributed.
 Dataset/pretrained-model licenses are independent of this repository license.

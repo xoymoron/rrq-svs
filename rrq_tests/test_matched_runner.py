@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 
 import torch
+import pytest
 
 from rrq.distributed import Distributed
 from rrq.experiment import Experiment,model_config
@@ -36,7 +37,7 @@ def make_experiment(tmp_path):
     write_json(e.root/'cache-complete.json',dict(protocol_sha256=e.hash,n=4))
     (e.root/'common').mkdir();torch.manual_seed(123)
     model=TokSingDAC(**model_config(e.vocab,cfg))
-    atomic_save(dict(protocol_sha256=e.hash,model=model.state_dict(),model_config=model.config),e.root/'common/best.pt')
+    atomic_save(dict(protocol_sha256=e.hash,arm='common',model=model.state_dict(),model_config=model.config),e.root/'common/best.pt')
     common_hash=sha256(e.root/'common/best.pt')
     for r in rows[:3]:
         predicted=torch.ones(9,1,4,dtype=torch.int16);corrected=torch.full_like(predicted,2);corrected[0]=1
@@ -73,9 +74,35 @@ def test_three_arms_share_initialization_schedule_and_resume_exactly(tmp_path,mo
         record=json.loads((e.root/arm/'epoch-002.json').read_text())
         records.append((initial,record))
         shutil.copyfile(e.root/arm/'resume-fixture.pt',e.root/arm/'last.pt')
+        (e.root/arm/'best.pt').unlink()  # interrupted or missing selection artifact
         runner.train_stage(e,Distributed(),torch.device('cpu'),arm)
         resumed=e.checkpoint(e.root/arm/'last.pt')
         assert all(torch.equal(full['model'][k],resumed['model'][k]) for k in full['model'])
     assert len({r['schedule_sha256'] for _,r in records})==1
     assert len({r['shared_predicted_mixture_sha256'] for _,r in records})==1
     assert len({r['parameter_sha256'] for _,r in records})>1
+
+
+def test_last_checkpoint_is_written_only_after_best_and_epoch_report(tmp_path,monkeypatch):
+    torch.set_num_threads(1);e=make_experiment(tmp_path)
+    monkeypatch.setattr(runner,'FrozenDAC',lambda *a:None)
+    monkeypatch.setattr(runner,'tracker',lambda *a,**k:None)
+    monkeypatch.setattr(runner,'evaluate_panel',lambda *a,**k:dict(
+        language_macro={'generated':{'mrstft_spectral_convergence':.5}},per_language={},diagnostics={},samples=[]))
+    save=runner.atomic_save
+    def ordered_save(value,path):
+        path=Path(path)
+        if path.name=='last.pt':
+            assert (path.parent/'best.pt').exists(), 'last published before best'
+            assert (path.parent/f"epoch-{value['epoch']:03d}.json").exists(), 'last published before report'
+        save(value,path)
+    monkeypatch.setattr(runner,'atomic_save',ordered_save)
+    runner.train_stage(e,Distributed(),torch.device('cpu'),'baseline')
+
+
+def test_changing_imported_selection_code_invalidates_protocol(tmp_path,monkeypatch):
+    import rrq.experiment as module
+    e=make_experiment(tmp_path);original=module.sha256
+    monkeypatch.setattr(module,'sha256',lambda p:'changed' if Path(p).name=='toksing_run.py' else original(p))
+    with pytest.raises(ValueError,match='protocol mismatch'):
+        Experiment(e.prepared,e.root,e.codec,tmp_path/'config.json')

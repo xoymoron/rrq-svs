@@ -5,6 +5,8 @@ import json
 import math
 from pathlib import Path
 import random
+import importlib.metadata
+import platform
 
 import torch
 
@@ -71,7 +73,10 @@ class Experiment:
             prefix='offline frozen common-model greedy first codebook; all arms self-generate at primary evaluation',
             selection='fixed validation panel language-macro free-running MRSTFT spectral convergence')
         self.protocol['implementation']={name:sha256(Path(__file__).parent/name) for name in
-            ('experiment.py','matched_run.py','toksing_model.py','toksing_data.py','targets.py','core.py','dac_codec.py','metrics.py','distributed.py')}
+            ('experiment.py','matched_run.py','toksing_model.py','toksing_data.py','targets.py','core.py','dac_codec.py','metrics.py','distributed.py','toksing_run.py','tracking.py','io.py')}
+        self.protocol['environment']=dict(python=platform.python_version(),cuda=torch.version.cuda,
+            cudnn=torch.backends.cudnn.version(),packages={name:importlib.metadata.version(name) for name in
+                ('torch','torchaudio','numpy','scipy','soundfile','descript-audio-codec')})
         self.hash=fingerprint(self.protocol)
         self.protocol['sha256']=self.hash
         lock=self.root/'protocol.json'

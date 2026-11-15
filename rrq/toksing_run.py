@@ -68,10 +68,15 @@ def summary(samples):
 def tracker(root,stage,config):
     if not os.environ.get('WANDB_PROJECT'): return None
     import wandb
+    metadata=root/(stage+'-wandb.json');options={}
+    if stage=='training' and metadata.exists():
+        options=dict(id=json.loads(metadata.read_text())['id'],resume='allow')
+    group=config.get('experiment_name',root.name)
+    name=group+'/'+config.get('arm',stage)
     run=wandb.init(project=os.environ['WANDB_PROJECT'],entity=os.environ.get('WANDB_ENTITY'),
-                   name=root.name+'/'+stage,group=root.name,job_type=stage,config=config,
+                   name=name,group=group,job_type=stage,config=config,**options,
                    dir=str(root),save_code=False)
-    write_json(root/(stage+'-wandb.json'),dict(url=run.url,id=run.id))
+    write_json(metadata,dict(url=run.url,id=run.id))
     return run
 
 
