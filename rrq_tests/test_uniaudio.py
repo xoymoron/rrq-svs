@@ -151,3 +151,15 @@ def test_load_full_official_checkpoint_numeric_reporter(tmp_path):
     loaded = api.load_release(path)
     assert torch.equal(loaded['model']['x'],torch.arange(3))
     assert loaded['reporter']['loss'] == 1.2
+
+
+def test_failed_pilot_cannot_report_success(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from rrq.uniaudio_pilot import aggregate
+    (tmp_path/'panel.json').write_text(json.dumps({'items':[{'target':{'id':'a'}}]}))
+    (tmp_path/'a').mkdir()
+    (tmp_path/'a/result.json').write_text(json.dumps({'id':'a','status':'failed','error':'dependency'}))
+    with pytest.raises(RuntimeError, match='failed'):
+        aggregate(SimpleNamespace(output=str(tmp_path),wandb=False))
+    assert json.loads((tmp_path/'summary.json').read_text())['successful'] == 0

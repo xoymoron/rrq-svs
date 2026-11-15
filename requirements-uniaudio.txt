@@ -2,6 +2,7 @@
 torch==2.6.0
 torchaudio==2.6.0
 numpy<2
+setuptools<81  # pyworld imports pkg_resources
 scipy
 PyYAML
 einops

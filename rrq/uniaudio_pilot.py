@@ -186,7 +186,9 @@ def aggregate(args):
         run.log({'audition':table, 'n_success':len(ok), 'n_failed':len(rows)-len(ok)})
         for arm, metrics in summary.get('phrase_mean',{}).items():
             run.summary[arm] = metrics
-        run.finish()
+        run.finish(exit_code=0 if len(ok)==len(rows) else 1)
+    if len(ok) != len(rows):
+        raise RuntimeError(f'{len(rows)-len(ok)} pilot items failed; see summary.json')
 
 
 def main():
