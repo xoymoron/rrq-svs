@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from .cached_ar import generate
+from .cached_ar import generate_batch
 from .core import requantize
 from .data_download import free_space
 from .io import sha256, write_json, safe_id
@@ -196,7 +196,7 @@ def train(args):
     start_epoch=1; best=float('inf')
     if (out/'last.pt').exists():
         last=ex.load(out/'last.pt'); optimizer.load_state_dict(last['optimizer']); start_epoch=last['epoch']+1; metrics=last['metrics']
-        best=json.loads((out/'best.json').read_text())['value'] if (out/'best.json').exists() else best
+        if warm: best=recover_best(out,ex.protocol_hash,last)
     elif warm:
         atomic_json(out/'initial-validation.json',ex.validate(shuffle=True))
     epochs=cfg['warmup_epochs'] if warm else cfg['branch_epochs']
@@ -252,20 +252,60 @@ def trainable_names_from_checkpoint(path):
     return list(torch.load(path,map_location='cpu',weights_only=True)['parameters'])
 
 
+def recover_best(out,protocol_hash,last=None):
+    """Recover a best checkpoint if interruption occurred after last.pt was saved."""
+    out=Path(out)
+    last=torch.load(out/'last.pt',map_location='cpu',weights_only=True) if last is None else last
+    candidates=[last]
+    if (out/'best.pt').exists(): candidates.append(torch.load(out/'best.pt',map_location='cpu',weights_only=True))
+    if any(c['protocol_sha256']!=protocol_hash for c in candidates): raise ValueError('best checkpoint protocol mismatch')
+    chosen=min(candidates,key=lambda c:c['metrics']['language_macro_ce'])
+    if chosen is last:
+        free_space(out,sum(v.numel()*v.element_size() for v in chosen['parameters'].values()))
+        temp=out/'best.tmp'; torch.save({k:v for k,v in chosen.items() if k!='optimizer'},temp); temp.replace(out/'best.pt')
+    value=chosen['metrics']['language_macro_ce']
+    atomic_json(out/'best.json',dict(epoch=chosen['epoch'],value=value))
+    return value
+
+
+def render_pair_valid(path,frames,expected):
+    import soundfile as sf
+    if not path.exists() or not path.with_suffix('.npz').exists(): return False
+    try:
+        info=sf.info(path)
+        if (info.frames,info.samplerate,info.channels)!=(frames*480,24000,1): return False
+        with np.load(path.with_suffix('.npz'),allow_pickle=False) as f:
+            meta=json.loads(str(f['metadata'].item())); codes=f['codes']
+            if codes.shape!=(3,frames) or codes.dtype.kind not in 'iu' or (codes<0).any() or (codes>=1024).any(): return False
+        return all(meta.get(k)==v for k,v in expected.items()) and meta.get('waveform_sha256')==sha256(path)
+    except (ValueError,KeyError,OSError): return False
+
+
+def batches_of_rows(rows,size=8):
+    ordered=sorted(rows,key=lambda r:(r['n_frames'],r['id']))
+    return [ordered[i:i+size] for i in range(0,len(ordered),size)]
+
+
 def make_targets(args):
     ex=Experiment(args.root,args.device); ex.load(args.root/'warmup/best.pt'); ex.model.requires_grad_(False)
     out=args.root/'targets'; out.mkdir(exist_ok=True); common_hash=sha256(args.root/'warmup/best.pt')
     codec=load_codec(ex.cfg['assets']/'codec/ckpt_01135000.pth',args.device)
+    pending=[]
+    for row in ex.rows:
+        path=out/(safe_id(row['id'])+'.npz')
+        if path.exists():
+            with np.load(path,allow_pickle=False) as f: meta=json.loads(str(f['metadata'].item()))
+            if meta['common_sha256']!=common_hash or meta['audio_sha256']!=row['audio_sha256'] or meta['protocol_sha256']!=ex.protocol_hash:
+                raise ValueError('stale target cache')
+        else: pending.append(row)
+    done=len(ex.rows)-len(pending)
     with torch.inference_mode():
-        for i,row in enumerate(ex.rows,1):
+      for batch in batches_of_rows(pending):
+        prefixes=[pack(r,ex.vocab)[0][None].to(args.device) for r in batch]
+        with torch.autocast('cuda',dtype=torch.bfloat16):
+            predictions=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch])
+        for row,predicted in zip(batch,predictions):
             path=out/(safe_id(row['id'])+'.npz')
-            if path.exists():
-                with np.load(path,allow_pickle=False) as f: meta=json.loads(str(f['metadata'].item()))
-                if meta['common_sha256']!=common_hash or meta['audio_sha256']!=row['audio_sha256']: raise ValueError('stale target cache')
-                continue
-            prefix,_,_=pack(row,ex.vocab)
-            with torch.autocast('cuda',dtype=torch.bfloat16):
-                predicted=generate(ex.model,prefix[None].to(args.device),ex.prompt,ex.vocab,row['n_frames'])
             pcm,_,_=prepare_audio(row['audio'],1.)
             z=codec.encoder(torch.from_numpy(pcm)[None,None].to(args.device))
             clean=codec.quantizer.vq.encode(z,n_q=3)
@@ -279,8 +319,9 @@ def make_targets(args):
             np.savez_compressed(tmp,clean=clean[:,0].cpu().numpy(),predicted=predicted,rrq=corrected,
                 latent=z[0].float().cpu().numpy(),metadata=np.array(json.dumps(meta)))
             tmp.replace(path)
-            print('TARGETS',i,len(ex.rows),row['language'],row['id'],flush=True)
-            atomic_json(out/'status.json',dict(done=i,total=len(ex.rows),last_id=row['id']))
+            done+=1
+            print('TARGETS',done,len(ex.rows),row['language'],row['id'],flush=True)
+            atomic_json(out/'status.json',dict(done=done,total=len(ex.rows),last_id=row['id']))
     atomic_json(out/'index.json',dict(common_sha256=common_hash,protocol_sha256=ex.protocol_hash,
         split_ids=ex.cfg['split_ids'],count=len(ex.rows)))
     print('TARGETS_COMPLETE',flush=True)
@@ -294,27 +335,39 @@ def render(args):
     ex.model.requires_grad_(False)
     label=args.variant if args.variant in ('common','initial') else f'{args.variant}-{args.seed}'
     out=args.root/'renders'/args.split/label; out.mkdir(parents=True,exist_ok=True)
+    checkpoint_hash=sha256(args.root/'warmup/best.pt') if args.variant=='common' else (
+        sha256(args.root/f'{args.variant}-{args.seed}/final.pt') if args.variant in ARMS else ex.cfg['base_sha256'])
+    provenance=dict(protocol_sha256=ex.protocol_hash,checkpoint_sha256=checkpoint_hash,variant=label,generation='batched-kv-v1')
     vocoder=load_vocoder(ex.cfg['assets']/'vocoder_24k/g_00885000',args.device)
-    for i,row in enumerate(ex.split(args.split),1):
-        path=out/(safe_id(row['id'])+'.wav')
-        if path.exists(): continue
-        prefix,_,_=pack(row,ex.vocab)
+    rows=ex.split(args.split)
+    pending=[r for r in rows if not render_pair_valid(out/(r['id']+'.wav'),r['n_frames'],provenance)]
+    done=len(rows)-len(pending)
+    for batch in batches_of_rows(pending):
         if args.variant=='common':
-            with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f: codes=f['predicted'].copy()
+            generated=[]
+            for row in batch:
+                with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f: generated.append(f['predicted'].copy())
         else:
             coarse=None
             if args.variant in ARMS:
-                with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f: coarse=f['predicted'][0].copy()
+                coarse=[]
+                for row in batch:
+                    with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f: coarse.append(f['predicted'][0].copy())
+            prefixes=[pack(r,ex.vocab)[0][None].to(args.device) for r in batch]
             with torch.autocast('cuda',dtype=torch.bfloat16):
-                codes=generate(ex.model,prefix[None].to(args.device),ex.prompt,ex.vocab,row['n_frames'],coarse)
-        with torch.inference_mode(): wave=vocoder(torch.from_numpy(codes)[None].to(args.device))[0,0].float().cpu().numpy()
-        if len(wave)!=row['n_frames']*480 or not np.isfinite(wave).all(): raise ValueError('invalid decoder output')
-        temp=path.with_suffix('.tmp.wav'); sf.write(temp,wave,24000,subtype='FLOAT'); temp.replace(path)
-        np.savez_compressed(path.with_suffix('.npz'),codes=codes)
-        print('RENDER',label,args.split,i,len(ex.split(args.split)),row['id'],flush=True)
+                generated=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch],coarse)
+        for row,codes in zip(batch,generated):
+            path=out/(row['id']+'.wav')
+            with torch.inference_mode(): wave=vocoder(torch.from_numpy(codes)[None].to(args.device))[0,0].float().cpu().numpy()
+            if len(wave)!=row['n_frames']*480 or not np.isfinite(wave).all(): raise ValueError('invalid decoder output')
+            temp=path.with_suffix('.tmp.wav'); sf.write(temp,wave,24000,subtype='FLOAT')
+            tmp_codes=path.with_suffix('.tmp.npz')
+            np.savez_compressed(tmp_codes,codes=codes,metadata=np.array(json.dumps(dict(provenance,waveform_sha256=sha256(temp)))))
+            tmp_codes.replace(path.with_suffix('.npz')); temp.replace(path)
+            done+=1
+            print('RENDER',label,args.split,done,len(rows),row['id'],flush=True)
     atomic_json(out/'complete.json',dict(count=len(ex.split(args.split)),variant=label,protocol_sha256=ex.protocol_hash,
-        checkpoint_sha256=sha256(args.root/'warmup/best.pt') if args.variant=='common' else
-        sha256(args.root/f'{args.variant}-{args.seed}/final.pt') if args.variant in ARMS else ex.cfg['base_sha256'],
+        checkpoint_sha256=checkpoint_hash,
         fixed_common_coarse=args.variant in ARMS))
 
 

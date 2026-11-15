@@ -64,3 +64,42 @@ def test_character_error_keeps_language_characters_and_reports_insertions():
     assert text_normalize('안녕, Hello! É')=='안녕helloé'
     assert character_error('abc','axc')['cer']==pytest.approx(1/3)
     assert character_error('a','aaaa')['cer']==3
+
+
+def test_paired_summary_refuses_mismatched_items():
+    from rrq.experiment_summary import paired_song_ci
+    a={'x':dict(song_group='song',metrics={'cer':.2})}
+    b={'x':dict(song_group='song',metrics={'cer':.4})}
+    assert paired_song_ci(a,b,'cer')['song_macro_difference']==pytest.approx(-.2)
+    with pytest.raises(ValueError,match='IDs'): paired_song_ci(a,{},'cer')
+
+
+def test_batched_generation_matches_serial_with_unequal_prefix_lengths():
+    from rrq.cached_ar import generate, generate_batch
+    from rrq.multilingual import Vocabulary
+    vocab=Vocabulary(['x']+[f'aco_{i}' for i in range(3072)])
+    model=tiny(len(vocab.tokens)); prompt=torch.randn(1,3,8)
+    prefixes=[torch.ones(1,30,dtype=torch.long),torch.ones(1,42,dtype=torch.long)]
+    coarse=[np.array([1,2,3]),np.array([15,25])]
+    actual=generate_batch(model,prefixes,prompt,vocab,[3,2],coarse)
+    for i in range(2):
+        expected=generate(model,prefixes[i],prompt,vocab,len(coarse[i]),coarse[i])
+        assert np.array_equal(actual[i],expected)
+
+
+def test_resume_recovers_unpublished_best_from_last(tmp_path):
+    import json
+    from rrq.experiment import recover_best
+    data=dict(protocol_sha256='p',parameters={'x':torch.ones(1)},epoch=2,metrics={'language_macro_ce':1.0},optimizer={})
+    torch.save(data,tmp_path/'last.pt')
+    torch.save(dict(data,epoch=1,metrics={'language_macro_ce':2.0}),tmp_path/'best.pt')
+    (tmp_path/'best.json').write_text(json.dumps({'epoch':1,'value':2.0}))
+    assert recover_best(tmp_path,'p')==1.0
+    assert json.loads((tmp_path/'best.json').read_text())['epoch']==2
+
+
+def test_render_pair_requires_codes_and_matching_provenance(tmp_path):
+    import soundfile as sf
+    from rrq.experiment import render_pair_valid
+    wave=tmp_path/'x.wav'; sf.write(wave,np.zeros(480*3),24000,subtype='FLOAT')
+    assert not render_pair_valid(wave,3,{'protocol_sha256':'p'})

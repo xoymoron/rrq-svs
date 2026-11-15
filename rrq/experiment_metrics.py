@@ -98,7 +98,10 @@ def evaluate(args):
             saved=json.loads(output.read_text())
             if saved['asr_sha256']!=asr_hash or saved['protocol_sha256']!=sha256(args.root/'protocol.json'):
                 raise ValueError('evaluation provenance mismatch')
-            result.extend(saved['samples']); continue
+            indexed={r['id']:r for r in saved['samples']}
+            if set(indexed)=={r['id'] for r in rows} and all(
+                indexed[r['id']]['waveform_sha256']==sha256(render_root/label/(r['id']+'.wav')) for r in rows):
+                result.extend(saved['samples']); continue
         jobs=[(row,render_root/label/(row['id']+'.wav')) for row in rows]
         with ProcessPoolExecutor(max_workers=4,mp_context=multiprocessing.get_context('spawn')) as pool:
             metrics=list(pool.map(waveform_metrics,jobs))
