@@ -65,28 +65,3 @@ def next_patch_context(model,prefix,prompt):
 def patch_logits(model,context,current):
     local=torch.cat([current.new_zeros((current.shape[0],1)),current[:,:-1]],dim=1)
     return model.lm_head(model.local_model(model.local_model.get_embeding(local)+context))
-
-
-@torch.inference_mode()
-def generate_codes(model,prefix,prompt,vocab,frames):
-    """Greedy, exact-duration, target-free acoustic rollout; no teacher forcing.
-
-    Pitch bias comes from score, so generation starts after acoustic_start.
-    Length is the provided phoneme clock. No learned stop/duration claim.
-    """
-    model.eval()
-    starts=[vocab.index['aco_'+str(q*1024)] for q in range(3)]
-    for q,start in enumerate(starts):
-        if any(vocab.index['aco_'+str(q*1024+i)]!=start+i for i in range(1024)):
-            raise ValueError('non-contiguous native codebook vocabulary')
-    generated=[]
-    for t in range(frames):
-        context=next_patch_context(model,prefix,prompt)
-        current=prefix.new_zeros((1,3))
-        for q,start in enumerate(starts):
-            logits=patch_logits(model,context,current)[:,q,start:start+1024]
-            current[:,q]=logits.argmax(-1)+start
-        generated.append(current[0]-current.new_tensor(starts))
-        prefix=torch.cat([prefix,current],dim=1)
-        if (t+1)%50==0: print(f'generated {t+1}/{frames} frames',flush=True)
-    return torch.stack(generated,dim=1).cpu().numpy()

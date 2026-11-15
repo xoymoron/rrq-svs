@@ -111,31 +111,6 @@ def init(args):
     print('PROTOCOL_LOCKED',json.dumps({s:len(ids) for s,ids in cfg['split_ids'].items()}),flush=True)
 
 
-def revise_sampling(args):
-    """Preserve failed-greedy pilot; import identical common weights into a new protocol."""
-    import shutil
-    if args.root.exists(): raise ValueError('revised experiment root already exists')
-    source=args.from_root
-    cfg=json.loads((source/'protocol.json').read_text())
-    if not (source/'warmup/complete.json').exists(): raise ValueError('source common training incomplete')
-    cfg.update(temperature=.8,sampling_seed=20261115,
-        generation='upstream temperature 0.8; no top-k; item-keyed common random numbers; identical frozen coarse for all arms',
-        parent_protocol_sha256=sha256(source/'protocol.json'),parent_common_sha256=sha256(source/'warmup/best.pt'),
-        revision_reason='Validation greedy code collapse; restore original Prompt-Singer temperature before any test evaluation')
-    args.root.mkdir(parents=True); atomic_json(args.root/'protocol.json',cfg)
-    out=args.root/'warmup'; out.mkdir()
-    state=torch.load(source/'warmup/best.pt',map_location='cpu',weights_only=True)
-    if state['protocol_sha256']!=cfg['parent_protocol_sha256']: raise ValueError('source warmup provenance mismatch')
-    state['protocol_sha256']=sha256(args.root/'protocol.json')
-    state['imported_source_sha256']=cfg['parent_common_sha256']; torch.save(state,out/'best.pt')
-    for name in ('best.json','initial-validation.json','selected-validation.json','status.json'):
-        shutil.copyfile(source/'warmup'/name,out/name)
-    complete=json.loads((source/'warmup/complete.json').read_text())
-    complete.update(protocol_sha256=state['protocol_sha256'],imported_from=str(source.resolve()),
-        note='Identical trained parameter tensors, no additional warmup or test-based selection')
-    atomic_json(out/'complete.json',complete)
-    print('REVISED_SAMPLING_PROTOCOL',str(args.root),flush=True)
-
 
 def sampling_options(ex,batch):
     return dict(temperature=ex.cfg.get('temperature',0.),sampling_seed=ex.cfg.get('sampling_seed',0),
@@ -472,14 +447,13 @@ def main():
     q=sub.add_parser('init')
     q.add_argument('--world-size',type=int,choices=[1,2],default=1)
     for name in ('bundle','assets','prompt','cache'): q.add_argument('--'+name,type=Path,required=True)
-    q=sub.add_parser('revise-sampling'); q.add_argument('--from-root',type=Path,required=True)
     q=sub.add_parser('train'); q.add_argument('--stage',choices=['warmup','branch'],required=True)
     q.add_argument('--arm',choices=ARMS,default='baseline'); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
     q=sub.add_parser('targets'); q.add_argument('--split',choices=['train','valid','test'])
     q=sub.add_parser('render'); q.add_argument('--variant',choices=['initial','common',*ARMS],required=True)
     q.add_argument('--split',choices=['valid','test'],required=True); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
     args=p.parse_args(); torch.set_num_threads(2); torch.manual_seed(17)
-    {'init':init,'revise-sampling':revise_sampling,'train':train,'targets':make_targets,'render':render}[args.command](args)
+    {'init':init,'train':train,'targets':make_targets,'render':render}[args.command](args)
 
 
 if __name__=='__main__': main()
