@@ -25,6 +25,19 @@ from .official_data import world_f0, pitch_metrics, paired_pitch_metrics
 from .tracking import token_metrics
 
 
+def evaluation_contract(cfg):
+    asr=cfg.get('pronunciation',{})
+    identity=dict(version=2,implementation_sha256=sha256(__file__),
+                  panel_per_language=cfg.get('validation_per_language',2),pronunciation=asr)
+    if asr.get('enabled'):
+        from . import pronunciation
+        import importlib.metadata
+        identity['asr_provenance']=json.loads((Path(cfg['asr_model_path'])/'provenance.json').read_text())
+        identity['asr_implementation_sha256']=sha256(pronunciation.__file__)
+        identity['asr_runtime']={p:importlib.metadata.version(p) for p in ('faster-whisper','ctranslate2','opencc-python-reimplemented')}
+    return identity
+
+
 def condition_variant(sequence,tokens,kind):
     if kind not in ('phone','midi'):raise ValueError('unknown condition perturbation')
     changed=sequence.clone()
@@ -107,6 +120,9 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
     from .uniaudio_train import protocol
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     panels=json.loads(_verify_artifact(Path(cfg['prepared_path']),data.recipe,'panels.json').read_text())
+    if cfg.get('validation_per_language',2)!=2:
+        from .gtsinger_prepare import select_panel
+        panels['valid']=select_panel(list(data.rows.values()),'valid',cfg['validation_per_language'])
     languages=sorted(languages or {r['language'] for r in data.rows.values()})
     selected=[i for i in panels['valid'] if data.rows[i]['language'] in languages]
     if not selected:raise ValueError('empty validation panel')
@@ -153,6 +169,11 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
             torch.save(dict(predicted=predicted.cpu(),clean=clean.cpu()),folder/'tokens.pt')
             example=dict(id=row_id,language=row['language'],singer=row['singer'],**stats,
                          audio=paths,codec=measure(raw,reconstructed),oracle=oracle,seconds=time.monotonic()-start)
+            if cfg.get('pronunciation',{}).get('enabled'):
+                if row['language']!='Chinese':raise ValueError('ASR pronunciation protocol currently supports Chinese only')
+                from . import pronunciation
+                example['pronunciation']=pronunciation.evaluate(row['lyrics'],paths,
+                    dict(model_path=cfg['asr_model_path'],cache_path=cfg['asr_cache_path']),runtime.local_rank)
             write_json(folder/'metrics.json',example);examples.append(example)
     finally:model.train(was_training)
     examples=sum(runtime.gather(examples),[])
@@ -162,13 +183,27 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
         grouped[row['language']].append({k:v for k,v in row.items() if isinstance(v,(int,float)) or v is None})
     per_language={language:mean_maps(values) for language,values in grouped.items()}
     report=dict(protocol_sha256=protocol(data),checkpoint_sha256=sha256(checkpoint_path),languages=languages,
+                evaluation_contract=evaluation_contract(cfg),panel_ids=selected,
                 examples=sorted(examples,key=lambda x:x['id']),per_language=per_language,macro=mean_maps(list(per_language.values())),
                 thresholds=cfg['gate'],operational_gate_passed=operational_gate(per_language,cfg['gate'],languages),
-                scope='Fixed validation panel, two utterances per language; not the untouched test set.',
+                scope=f"Fixed validation panel, {cfg.get('validation_per_language',2)} utterances per language; no test data.",
                 quality_limit='Pitch/voicing and condition-CE diagnostic only; no lyric intelligibility or MOS claim.',
                 oracle_limit='Target-latent suffix oracle after free generation; not deployable inference or learnability proof.',
                 comparison='Same clock; zero-pad missing tails; no DTW, pitch shift, rescaling or time stretch.',
                 sampling=dict(topk=cfg.get('topk',30),temperature=cfg.get('temperature',.8),seed=cfg.get('seed',17)))
+    if cfg.get('pronunciation',{}).get('enabled'):
+        from . import pronunciation
+        report['pronunciation']=pronunciation.aggregate([r['pronunciation'] for r in examples])
+        report['pronunciation_gate_passed']=pronunciation.gate(report['pronunciation'],cfg['pronunciation']['gate'])
+        report['per_singer']={}
+        for singer in sorted({r['singer'] for r in examples}):
+            rows=[r for r in examples if r['singer']==singer]
+            acoustic=mean_maps([{k:v for k,v in r.items() if isinstance(v,(int,float)) or v is None} for r in rows])
+            speech=pronunciation.aggregate([r['pronunciation'] for r in rows])
+            passed=operational_gate({singer:acoustic},cfg['gate'],[singer]) and pronunciation.gate(speech,cfg['pronunciation']['gate'])
+            report['per_singer'][singer]=dict(acoustic=acoustic,pronunciation=speech,gate_passed=passed)
+        report['operational_gate_passed']=report['operational_gate_passed'] and report['pronunciation_gate_passed'] and all(r['gate_passed'] for r in report['per_singer'].values())
+        report['quality_limit']='ASR lyric intelligibility proxy with raw/codec controls; not human pronunciation, identity or MOS validation.'
     if runtime.rank==0:write_json(out/'evaluation.json',report)
     return report
 

@@ -12,3 +12,6 @@ pyworld
 tqdm
 pytest
 wandb
+faster-whisper==1.2.1
+ctranslate2==4.9.0
+opencc-python-reimplemented==0.1.7

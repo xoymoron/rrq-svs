@@ -131,3 +131,30 @@ history and clean-forward equivalence; learned RRQ effectiveness is untested.
 Old runners and environments are inactive. Broad deletion waits until the
 replacement baseline passes synthesis validation; raw corpus and historical
 evidence are preserved.
+
+## Chinese baseline adaptation
+
+`config/uniaudio-gtsinger-zh.json` uses the existing complete native cache and
+Chinese training split (6,147 phrases, 8,864 chunks). It evaluates eight fixed
+validation phrases before training, every 500 updates, and at epoch boundaries.
+The untouched test split is excluded. Native inference is unchanged.
+
+Install the pinned ASR dependencies in `requirements-uniaudio.txt`. Download
+`Systran/faster-whisper-large-v3` to `../data/uniaudio/whisper-large-v3` and store
+its resolved revision and model.bin SHA256 in provenance.json. ASR receives
+audio only, fixed Chinese language, no lyric prompt or previous transcript.
+Raw/codec/generated transcripts and normalized Chinese CER are logged together;
+unreliable reference recognition prevents pronunciation-gate acceptance. CER is
+an ASR-based lyric-intelligibility proxy, not human pronunciation or MOS.
+
+```bash
+export UNIAUDIO_RECIPE=config/uniaudio-gtsinger-zh.json
+bash scripts/run_uniaudio_stage.sh train artifacts/uniaudio-zh-baseline \
+  --arm common --epochs 5 --languages Chinese --wandb
+```
+
+`last.pt` stores the next epoch/batch cursor and optimizer for exact data-order
+resumption. `live.json` reports current progress. W&B includes per-example
+audition, expected lyrics, all three transcripts, CER, F0/voicing and clean CE.
+Both singers must pass the acoustic and calibrated ASR gates. This launcher
+never automatically starts RRQ.

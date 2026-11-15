@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import random
+import time
+import shutil
 
 import torch
 from torch import nn
@@ -136,12 +138,15 @@ def load_model(cfg,data,device,checkpoint=None):
 
 
 def run_contract(cfg,data,arm,languages,common_hash):
+    from .uniaudio_evaluate import evaluation_contract
     return dict(protocol_sha256=protocol(data),arm=arm,languages=languages,
                 common_sha256=common_hash,seed=cfg.get('seed',17),
                 learning_rate=cfg.get('learning_rate',1e-5),gradient_clip=cfg.get('gradient_clip',1.),
                 intervention_probability=cfg.get('intervention_probability',.5),
                 world_size=int(os.environ.get('WORLD_SIZE',1)),batch_per_gpu=1,
                 loss_weighting='global non-padding token mean',
+                evaluation_contract=evaluation_contract(cfg),
+                evaluation_interval_steps=cfg.get('evaluation_interval_steps',0),
                 trainer_sha256=sha256(__file__))
 
 
@@ -161,6 +166,21 @@ def language_scope(data,languages):
 def validate_gate(gate,expected):
     if not gate.get('operational_gate_passed') or any(gate.get(k)!=v for k,v in expected.items()):
         raise ValueError('common synthesis gate is absent, stale, wrong scope or failed')
+
+
+def resume_cursor(epoch,batch_index,total_batches):
+    if not 0<=batch_index<total_batches:raise ValueError('invalid batch cursor')
+    return (epoch+1,0) if batch_index+1==total_batches else (epoch,batch_index+1)
+
+
+def preserve_qualified(out,metrics):
+    target=out/'qualified'
+    if not metrics['operational_gate_passed'] or target.exists():return
+    if sha256(out/'last.pt')!=metrics['checkpoint_sha256']:raise ValueError('qualified checkpoint changed')
+    pending=out/'qualified.pending';pending.mkdir(exist_ok=True)
+    shutil.copyfile(out/'last.pt',pending/'common.pt')
+    write_json(pending/'evaluation.json',metrics)
+    pending.rename(target)
 
 
 def activation_checkpointing(generator):
@@ -295,6 +315,7 @@ def build_bank(cfg,data,out,runtime,common,languages=None):
 
 
 def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,resume=None,wandb=False):
+    from .uniaudio_evaluate import evaluate_loaded,evaluation_contract
     languages=language_scope(data,languages)
     if epochs<1:raise ValueError('positive epoch budget required')
     if arm!='common' and not common:raise ValueError('matched arms require the same common checkpoint')
@@ -304,7 +325,7 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
         gate=json.loads(gate_path.read_text()) if gate_path.exists() else {}
         validate_gate(gate,dict(checkpoint_sha256=sha256(common),protocol_sha256=protocol(data),
             languages=languages,thresholds=cfg['gate'],sampling=dict(topk=cfg.get('topk',30),
-            temperature=cfg.get('temperature',.8),seed=cfg.get('seed',17))))
+            temperature=cfg.get('temperature',.8),seed=cfg.get('seed',17)),evaluation_contract=evaluation_contract(cfg)))
     out.mkdir(parents=True,exist_ok=True)
     if (out/'last.pt').exists() and not resume:raise ValueError('existing run requires explicit resume')
     model,saved=load_model(cfg,data,runtime.device,resume or common)
@@ -322,6 +343,7 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
     if runtime.world>1:wrapped=DDP(wrapped,device_ids=[runtime.local_rank],broadcast_buffers=False,gradient_as_bucket_view=True)
     optimizer=torch.optim.AdamW([p for p in wrapped.parameters() if p.requires_grad],lr=cfg.get('learning_rate',1e-5),betas=(.9,.95),weight_decay=.001,foreach=False)
     step=saved['step'] if resume else 0;start=saved['next_epoch'] if resume else 0
+    start_batch=saved.get('next_batch',0) if resume else 0
     if resume:optimizer.load_state_dict(saved['optimizer'])
     selected=choose_segments(data,'train',languages)
     contract=bank_contract(cfg,data,common) if common else None
@@ -334,13 +356,38 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
         import wandb as wb
         log=wb.init(project=cfg.get('wandb_project','rrq-svs'),entity=cfg.get('wandb_entity'),
                     id=saved.get('wandb_run_id') if resume else None,resume='must' if resume and saved.get('wandb_run_id') else None,
-                    name=f'uniaudio-185m-{arm}',dir=str(out),config=dict(arm=arm,epochs=epochs,languages=languages,
-                    protocol_sha256=protocol(data),common_sha256=contract['common_sha256'] if contract else None))
+                    name=f'uniaudio-185m-{arm}-'+('-'.join(languages)),dir=str(out),config=dict(run_settings,epochs=epochs,
+                    train_segments=len(selected),global_batch=runtime.world))
+        log.define_metric('step');log.define_metric('*',step_metric='step')
+    def save_and_evaluate(next_epoch,next_batch):
+        runtime.barrier()
+        if runtime.rank==0:
+            checkpoint=dict(model=native_state(model),optimizer=optimizer.state_dict(),arm=arm,
+                            protocol_sha256=protocol(data),next_epoch=next_epoch,next_batch=next_batch,
+                            step=step,languages=languages,common_sha256=common_hash,seed=cfg.get('seed',17),
+                            run_contract=run_settings,wandb_run_id=log.id if log else None)
+            atomic_save(checkpoint,out/'last.pt')
+            write_json(out/'progress.json',{k:v for k,v in checkpoint.items() if k not in ('model','optimizer')})
+        runtime.barrier()
+        metrics=evaluate_loaded(cfg,data,model,out/'last.pt',out/f'step-{step:06d}',runtime,languages)
+        if runtime.rank==0:
+            write_json(out/'evaluation.json',metrics)
+            if arm=='common':preserve_qualified(out,metrics)
+            if log:log_evaluation(log,metrics,next_epoch+next_batch/len(epoch_batches(selected,runtime.world,cfg.get('seed',17),next_epoch)),step)
+            print(json.dumps(dict(step=step,gate=metrics['operational_gate_passed'],
+                within50=metrics['macro']['within_50_cents'],pronunciation=metrics.get('pronunciation')),ensure_ascii=False),flush=True)
+        runtime.barrier()
+    if cfg.get('evaluate_before_training'):
+        prior=json.loads((out/'evaluation.json').read_text()) if (out/'evaluation.json').exists() else {}
+        if not resume or prior.get('checkpoint_sha256')!=sha256(resume):save_and_evaluate(start,start_batch)
+    launch_step=step;started=time.monotonic()
     offset=data.vocab['tokens'].index('<audio_0>')
     for epoch in tqdm(range(start,epochs),desc=f'{arm} epochs',disable=runtime.rank!=0):
         batches=epoch_batches(selected,runtime.world,cfg.get('seed',17),epoch)
-        bar=tqdm(batches,desc=f'epoch {epoch+1}/{epochs}',disable=runtime.rank!=0,leave=False)
-        for batch in bar:
+        skip=start_batch if epoch==start else 0
+        bar=tqdm(enumerate(batches[skip:],start=skip),total=len(batches),initial=skip,
+                 desc=f'epoch {epoch+1}/{epochs}',disable=runtime.rank!=0,leave=False)
+        for batch_index,batch in bar:
             segment=batch[runtime.rank];real=segment is not None
             ex=data.example(segment or selected[0],runtime.device);seq=ex['sequence'];mask=torch.zeros_like(seq,dtype=torch.bool)
             item=read_bank(bank,ex,contract,metadata['file_sha256'][ex['id']]) if arm in ('exposure','rrq') else None
@@ -360,24 +407,14 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
             value=(summed/count).item()
             if runtime.rank==0:
                 bar.set_postfix(loss=f'{value:.3f}',step=step)
-                if log and step%10==0:log.log({'train/loss':value,'train/grad_norm':norm.item(),'epoch':epoch+1,'step':step})
-        runtime.barrier()
-        if runtime.rank==0:
-            checkpoint=dict(model=native_state(model),optimizer=optimizer.state_dict(),arm=arm,
-                            protocol_sha256=protocol(data),next_epoch=epoch+1,step=step,languages=languages,
-                            common_sha256=contract['common_sha256'] if contract else None,seed=cfg.get('seed',17),
-                            learning_rate=cfg.get('learning_rate',1e-5),intervention_probability=cfg.get('intervention_probability',.5),
-                            run_contract=run_settings,wandb_run_id=log.id if log else None)
-            atomic_save(checkpoint,out/'last.pt')
-            write_json(out/'progress.json',{k:v for k,v in checkpoint.items() if k not in ('model','optimizer')})
-        runtime.barrier()
-        # Generation has its own target-free path. Validation also computes clean
-        # CE, never comparing RRQ relabeled train CE to another arm's train CE.
-        from .uniaudio_evaluate import evaluate_loaded
-        metrics=evaluate_loaded(cfg,data,model,out/'last.pt',out/f'epoch-{epoch+1:03d}',runtime,languages)
-        if runtime.rank==0:
-            write_json(out/'evaluation.json',metrics)
-            if log:log_evaluation(log,metrics,epoch+1,step)
+                if step%10==0:
+                    progress={'train/loss':value,'train/grad_norm':norm.item(),'epoch':epoch+(batch_index+1)/len(batches),
+                              'step':step,'epochs_budget':epochs,'seconds_per_update':(time.monotonic()-started)/(step-launch_step)}
+                    write_json(out/'live.json',progress)
+                    if log:log.log(progress)
+            interval=cfg.get('evaluation_interval_steps',0)
+            if batch_index+1==len(batches) or (interval and step%interval==0):
+                save_and_evaluate(*resume_cursor(epoch,batch_index,len(batches)))
     if log:log.finish()
 
 
@@ -385,12 +422,17 @@ def log_evaluation(run,metrics,epoch,step):
     import wandb
     scalars={'epoch':epoch,'step':step}
     scalars.update({'valid/'+k:v for k,v in metrics['macro'].items()})
+    scalars.update({'valid/asr_'+k:v for k,v in metrics.get('pronunciation',{}).items()})
+    scalars['valid/operational_gate_passed']=int(metrics['operational_gate_passed'])
     for language,values in metrics['per_language'].items():
         scalars.update({f'valid/{language}/{k}':v for k,v in values.items()})
-    table=wandb.Table(columns=['id','language','reference','codec','generated','within50','voicing_error'])
+    table=wandb.Table(columns=['id','language','reference','codec','generated','within50','voicing_error',
+                               'lyrics','reference_asr','codec_asr','generated_asr','generated_cer'])
     for row in metrics['examples']:
+        speech=row.get('pronunciation');texts=[speech['transcripts'][arm]['raw'] for arm in ('reference','codec','generated')] if speech else [None]*3
         table.add_data(row['id'],row['language'],*[wandb.Audio(row['audio'][arm],sample_rate=16000)
-            for arm in ('reference','codec','generated')],row['within_50_cents'],row['voicing_error'])
+            for arm in ('reference','codec','generated')],row['within_50_cents'],row['voicing_error'],
+            speech['lyrics'] if speech else None,*texts,speech['metrics']['generated_cer'] if speech else None)
     scalars['audition']=table;run.log(scalars)
 
 

@@ -111,3 +111,27 @@ def test_chinese_or_stale_gate_cannot_unlock_multilingual_branches():
         with pytest.raises(ValueError,match='gate'):
             mod.validate_gate(dict(expected,operational_gate_passed=True,**changed),expected)
     mod.validate_gate(dict(expected,operational_gate_passed=True),expected)
+
+
+def test_resume_cursor_does_not_skip_or_repeat_training_examples():
+    mod=module()
+    assert hasattr(mod,'resume_cursor'), 'mid-epoch checkpoint cursor missing'
+    assert mod.resume_cursor(0,499,4432)==(0,500)
+    assert mod.resume_cursor(0,4431,4432)==(1,0)
+    batches=mod.epoch_batches(list(range(11)),2,17,0)
+    epoch,cursor=mod.resume_cursor(0,2,len(batches))
+    visited=[x for batch in batches[:3]+batches[cursor:] for x in batch if x is not None]
+    assert epoch==0 and sorted(visited)==list(range(11))
+
+
+def test_qualified_checkpoint_survives_later_training(tmp_path):
+    import hashlib,json
+    mod=module()
+    assert hasattr(mod,'preserve_qualified'), 'qualified baseline snapshot missing'
+    (tmp_path/'last.pt').write_bytes(b'first passed model')
+    metrics={'operational_gate_passed':True,'checkpoint_sha256':hashlib.sha256(b'first passed model').hexdigest()}
+    mod.preserve_qualified(tmp_path,metrics)
+    (tmp_path/'last.pt').write_bytes(b'later degraded model')
+    mod.preserve_qualified(tmp_path,dict(metrics,operational_gate_passed=False))
+    assert (tmp_path/'qualified'/'common.pt').read_bytes()==b'first passed model'
+    assert json.loads((tmp_path/'qualified'/'evaluation.json').read_text())==metrics
