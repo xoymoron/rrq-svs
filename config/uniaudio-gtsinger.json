@@ -1,0 +1,30 @@
+{
+  "upstream_path": "references/UniAudio",
+  "checkpoint_path": "data/uniaudio/checkpoints-20240722/uniaudio_v1/v1.checkpoint",
+  "model_config_path": "data/uniaudio/checkpoints-20240722/uniaudio_v1/config.yaml",
+  "codec_path": "data/uniaudio/checkpoints/universal_model",
+  "source_path": "data/toksing/gtsinger-full.jsonl",
+  "aliases_path": "rrq-svs/config/gtsinger-song-aliases.json",
+  "prepared_path": "data/uniaudio/gtsinger-prepared-v1",
+  "cache_path": "data/uniaudio/acoustic-cache-v1",
+  "seed": 17,
+  "workers": 4,
+  "max_frames": 400,
+  "prompt_frames": 150,
+  "learning_rate": 0.00001,
+  "gradient_clip": 1.0,
+  "intervention_probability": 0.5,
+  "topk": 30,
+  "temperature": 0.8,
+  "wandb_project": "rrq-svs",
+  "wandb_entity": "oxymoron_music",
+  "gate": {
+    "within_50_cents_min": 0.5,
+    "voiced_recall_min": 0.7,
+    "voicing_error_max": 0.2,
+    "f0_rmse_cents_max": 300.0,
+    "spectral_convergence_max": 0.9,
+    "phone_ce_gap_min": 0.0,
+    "midi_ce_gap_min": 0.0
+  }
+}

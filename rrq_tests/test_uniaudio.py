@@ -1,10 +1,11 @@
 """Contract tests using the actual upstream model, not a surrogate architecture."""
 from pathlib import Path
 import importlib.util
+import os
 import torch
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2] / 'references' / 'UniAudio'
+ROOT = Path(os.environ.get('UNIAUDIO_ROOT', Path(__file__).resolve().parents[2] / 'references' / 'UniAudio'))
 
 
 def adapter():
