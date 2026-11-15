@@ -175,8 +175,9 @@ def aggregate(args):
     print(json.dumps(summary,indent=2))
     if args.wandb:
         import wandb
-        run = wandb.init(project='rrq-svs', name='uniaudio-pretrained-native-oracle',
-                         config=json.loads((out/'runtime-0.json').read_text()), job_type='feasibility')
+        runtime = json.loads((out/'runtime-0.json').read_text())
+        run = wandb.init(project='rrq-svs', name=f"uniaudio-{runtime['parameters']//1_000_000}m-native-oracle",
+                         config=runtime, job_type='feasibility')
         table = wandb.Table(columns=['id','singer','arm','audio','latent_mse','spectral_convergence','f0_rmse_cents'])
         for r in ok:
             table.add_data(r['id'],r['singer'],'reference',wandb.Audio(str(out/r['id']/'reference.wav')),None,None,None)
