@@ -40,3 +40,14 @@ def test_technique_controls_must_be_binary_and_aligned():
     r=item('a','s','song');r['techniques']['mix_tech']=[0,2]
     with pytest.raises(ValueError,match='technique'):
         prepare_row(r,dict(samplerate=44100,frames=13230,channels=1))
+
+
+def test_conflicting_annotations_on_identical_pcm_are_not_arbitrarily_selected():
+    from rrq.gtsinger_prepare import deduplicate
+    a=item('a','s','title');a['pcm_sha256']='same'
+    b=deepcopy(a);b['id']='b';b['score']['ep_pitches'][0]=72
+    kept,duplicates,rejected=deduplicate([a,b])
+    assert not kept and not duplicates and {r['id'] for r in rejected}=={'a','b'}
+    b=deepcopy(a);b['id']='b'
+    kept,duplicates,rejected=deduplicate([b,a])
+    assert [r['id'] for r in kept]==['a'] and duplicates[0]['kept']=='a' and not rejected

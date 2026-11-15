@@ -162,7 +162,8 @@ def evaluate_panel(e,d,device,model,codec,ids,common_hash=None,folder=None,ablat
             metrics[arm]=m
             if folder:sf.write(folder/(item_id+'-'+arm+'.wav'),y,codec.sample_rate,subtype='FLOAT')
         samples.append(dict(id=item_id,language=row['language'],singer=row['singer'],song_group=row['song_group'],
-                            arms=metrics,diagnostics=diagnostic,tokens=token_metrics(generated[:,0].cpu().numpy())))
+                            arms=metrics,diagnostics=diagnostic,tokens=token_metrics(generated[:,0].cpu().numpy()),
+                            clean_prefix_audit=c.get('clean_prefix_audit')))
     samples=d.gather(samples)
     if len(samples)!=len(ids) or {r['id'] for r in samples}!=set(ids):raise ValueError('evaluation coverage mismatch')
     report=summary(samples)
@@ -180,6 +181,9 @@ def log_validation(run,report,epoch,folder=None):
     for lang,arms in report['per_language'].items():
         for arm,metrics in arms.items():values.update({f'valid/{lang}/{arm}/{k}':v for k,v in metrics.items() if v is not None})
     for lang,metrics in report['diagnostics'].items():values.update({f'valid/{lang}/{k}':v for k,v in metrics.items() if v is not None})
+    for lang in report['per_language']:
+        values.update({f'valid/{lang}/tokens/{k}':v for k,v in mean_maps([r['tokens'] for r in report['samples'] if r['language']==lang]).items()})
+    values['codec/clean_prefix_rounding_changes']=sum((r.get('clean_prefix_audit') or {}).get('changed_tokens',0) for r in report['samples'])
     run.log(values)
     if folder:
         for lang in sorted(report['per_language']):
@@ -281,6 +285,7 @@ def train_stage(e,d,device,arm):
                 best_state['model']={k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
                 atomic_save(best_state,out/'best.pt')
             report.update(epoch=epoch,step=step,selection_score=score,train=mean_maps(train_stats),
+                draws=len(draws),predicted_context_fraction=sum(r['mixed'] for r in train_stats)/sum(r['n'] for r in train_stats),
                 seconds=time.time()-started,parameter_sha256=synced,schedule_sha256=fingerprint(draws),
                 shared_predicted_mixture_sha256=fingerprint([mixture_choice(cfg['seed'],epoch,i,cfg['predicted_prefix_probability']) for i in range(len(draws))]))
             write_json(out/f'epoch-{epoch:03d}.json',report)

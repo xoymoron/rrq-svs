@@ -107,6 +107,22 @@ def select_panel(rows, split='valid', per_language=8):
     return sorted(selected)
 
 
+def deduplicate(rows):
+    groups=defaultdict(list)
+    for row in rows:groups[row['pcm_sha256']].append(row)
+    kept=[];duplicates=[];rejected=[]
+    for group in groups.values():
+        group=sorted(group,key=lambda r:r['id'])
+        conditions={json.dumps({k:r.get(k) for k in ('phones','phone_durations','score','techniques','singer','language')},sort_keys=True) for r in group}
+        if len(conditions)>1:
+            rejected.extend(dict(id=r['id'],reason='identical PCM has conflicting conditioning annotations',
+                                 duplicate_ids=[x['id'] for x in group]) for r in group)
+            continue
+        kept.append(group[0])
+        duplicates.extend(dict(id=r['id'],kept=group[0]['id']) for r in group[1:])
+    return sorted(kept,key=lambda r:r['id']),duplicates,rejected
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',required=True);p.add_argument('--root',required=True)
@@ -127,7 +143,7 @@ def main():
         try:
             path=Path(row['audio']);info=sf.info(path)
             result=prepare_row(row,dict(samplerate=info.samplerate,frames=info.frames,channels=info.channels))
-            checksum=hashlib.sha256();energy=0.;peak=0.;clipped=0
+            checksum=hashlib.sha256(f'{info.samplerate}:{info.channels}:'.encode());energy=0.;peak=0.;clipped=0
             for block in sf.blocks(path,blocksize=65536,dtype='float32',always_2d=True):
                 if not np.isfinite(block).all():raise ValueError('nonfinite audio')
                 checksum.update(block.astype('<f4',copy=False).tobytes())
@@ -143,11 +159,8 @@ def main():
             if error:rejected.append(error)
             else:valid.append(result)
     # Keep one canonical record for exact duplicate PCM, after family union.
-    families=build_families(valid,aliases);duplicates=[];seen={};unique=[]
-    for row in sorted(valid,key=lambda r:r['id']):
-        key=row['pcm_sha256']
-        if key in seen:duplicates.append(dict(id=row['id'],kept=seen[key]));continue
-        seen[key]=row['id'];unique.append(row)
+    families=build_families(valid,aliases)
+    unique,duplicates,conflicting=deduplicate(valid);rejected.extend(conflicting)
     splits=assign_splits(unique,families,a.seed)
     for row in unique:
         row.update(song_group=families[row['id']],split=splits[row['id']],split_policy='song-family-v1-seen-singer')
