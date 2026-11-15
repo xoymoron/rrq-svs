@@ -122,15 +122,23 @@ def native_state(model):
 
 def load_model(cfg,data,device,checkpoint=None):
     from .uniaudio_data import _identity
+    from .uniaudio_initialization import random_generator,validate_initialization
+    import yaml
     actual=_identity(cfg)
     if any(data.recipe.get(key)!=value for key,value in actual.items() if key!='config'):
         raise ValueError('runtime source or checkpoint differs from prepared recipe')
-    generator,_=ua.load_generator(cfg['upstream_path'],cfg['model_config_path'],
-                                  cfg['checkpoint_path'],device,dtype=torch.float32)
-    extend_vocabulary(generator,len(data.vocab['tokens']),cfg.get('seed',17))
+    mode=validate_initialization(cfg)
+    if mode=='scratch':
+        generator=random_generator(cfg['upstream_path'],yaml.safe_load(Path(cfg['model_config_path']).read_text(encoding='utf8')),
+                                   data.vocab['tokens'],cfg.get('seed',17),device)
+    else:
+        generator,_=ua.load_generator(cfg['upstream_path'],cfg['model_config_path'],
+                                      cfg['checkpoint_path'],device,dtype=torch.float32)
+        extend_vocabulary(generator,len(data.vocab['tokens']),cfg.get('seed',17))
     saved=None
     if checkpoint:
         saved=torch.load(checkpoint,map_location='cpu',weights_only=True)
+        validate_initialization(cfg,saved)
         if saved['protocol_sha256']!=protocol(data):raise ValueError('checkpoint protocol mismatch')
         generator.load_state_dict(saved['model'],strict=True)
     generator.train().requires_grad_(True)
@@ -141,6 +149,9 @@ def run_contract(cfg,data,arm,languages,common_hash):
     from .uniaudio_evaluate import evaluation_contract
     return dict(protocol_sha256=protocol(data),arm=arm,languages=languages,
                 common_sha256=common_hash,seed=cfg.get('seed',17),
+                initialization=cfg.get('initialization','release'),
+                lr_schedule=cfg.get('lr_schedule','constant'),warmup_steps=cfg.get('warmup_steps',0),
+                synthesis_chunk_frames=cfg.get('synthesis_chunk_frames',0),
                 learning_rate=cfg.get('learning_rate',1e-5),gradient_clip=cfg.get('gradient_clip',1.),
                 intervention_probability=cfg.get('intervention_probability',.5),
                 world_size=int(os.environ.get('WORLD_SIZE',1)),batch_per_gpu=1,
@@ -268,9 +279,13 @@ def preflight(cfg,data,out,runtime,languages=None):
             results.append(dict(id=ex['id'],language=ex['language'],arm=arm,loss=loss.item(),grad_norm=norm.item(),forward_max_abs=difference))
     if sha_state(model)!=before:raise ValueError('preflight changed model weights')
     merged=runtime.gather(results)
+    memory=runtime.gather(torch.cuda.max_memory_allocated(runtime.local_rank) if runtime.device.startswith('cuda') else 0)
     if runtime.rank==0:
         write_json(out,dict(status='passed',optimizer_steps=0,weights_unchanged=True,
                            world_size=runtime.world,protocol_sha256=protocol(data),results=sum(merged,[]),
+                           initialization=cfg.get('initialization','release'),initial_weights_sha256=before,
+                           trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad),
+                           peak_allocated_bytes_per_rank=memory,
                            synthesis_quality_passed=False))
 
 
@@ -316,10 +331,12 @@ def build_bank(cfg,data,out,runtime,common,languages=None):
 
 def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,resume=None,wandb=False):
     from .uniaudio_evaluate import evaluate_loaded,evaluation_contract
+    from .uniaudio_initialization import learning_rate_at
     languages=language_scope(data,languages)
     if epochs<1:raise ValueError('positive epoch budget required')
     if arm!='common' and not common:raise ValueError('matched arms require the same common checkpoint')
-    if arm=='common' and common:raise ValueError('common starts from the official release')
+    if arm=='common' and common:raise ValueError('common uses the configured initialization, not a branch checkpoint')
+    learning_rate_at(cfg,1)
     if arm!='common':
         gate_path=Path(common).parent/'evaluation.json'
         gate=json.loads(gate_path.read_text()) if gate_path.exists() else {}
@@ -356,7 +373,7 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
         import wandb as wb
         log=wb.init(project=cfg.get('wandb_project','rrq-svs'),entity=cfg.get('wandb_entity'),
                     id=saved.get('wandb_run_id') if resume else None,resume='must' if resume and saved.get('wandb_run_id') else None,
-                    name=f'uniaudio-185m-{arm}-'+('-'.join(languages)),dir=str(out),config=dict(run_settings,epochs=epochs,
+                    name=f"uniaudio-185m-{cfg.get('initialization','release')}-{arm}-"+('-'.join(languages)),dir=str(out),config=dict(run_settings,epochs=epochs,
                     train_segments=len(selected),global_batch=runtime.world))
         log.define_metric('step');log.define_metric('*',step_metric='step')
     def save_and_evaluate(next_epoch,next_batch):
@@ -401,6 +418,8 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
                 loss_sum=F.cross_entropy(logits.transpose(1,2),labels,ignore_index=0,reduction='sum')*(1 if real else 0)
                 loss=ddp_loss(loss_sum,count.item(),runtime.world)
             loss.backward();norm=nn.utils.clip_grad_norm_(wrapped.parameters(),cfg.get('gradient_clip',1.),error_if_nonfinite=True)
+            rate=learning_rate_at(cfg,step+1)
+            for group in optimizer.param_groups:group['lr']=rate
             optimizer.step();step+=1
             summed=loss_sum.detach().double()
             if runtime.world>1:dist.all_reduce(summed)
@@ -408,7 +427,7 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
             if runtime.rank==0:
                 bar.set_postfix(loss=f'{value:.3f}',step=step)
                 if step%10==0:
-                    progress={'train/loss':value,'train/grad_norm':norm.item(),'epoch':epoch+(batch_index+1)/len(batches),
+                    progress={'train/loss':value,'train/grad_norm':norm.item(),'train/learning_rate':rate,'epoch':epoch+(batch_index+1)/len(batches),
                               'step':step,'epochs_budget':epochs,'seconds_per_update':(time.monotonic()-started)/(step-launch_step)}
                     write_json(out/'live.json',progress)
                     if log:log.log(progress)
@@ -426,6 +445,11 @@ def log_evaluation(run,metrics,epoch,step):
     scalars['valid/operational_gate_passed']=int(metrics['operational_gate_passed'])
     for language,values in metrics['per_language'].items():
         scalars.update({f'valid/{language}/{k}':v for k,v in values.items()})
+    for language,values in metrics.get('per_language_pronunciation',{}).items():
+        scalars.update({f'valid/{language}/asr_{k}':v for k,v in values.items()})
+    for singer,values in metrics.get('per_singer',{}).items():
+        scalars.update({f'valid/singer/{singer}/{k}':v for k,v in values['acoustic'].items()})
+        scalars.update({f'valid/singer/{singer}/asr_{k}':v for k,v in values['pronunciation'].items()})
     table=wandb.Table(columns=['id','language','reference','codec','generated','within50','voicing_error',
                                'lyrics','reference_asr','codec_asr','generated_asr','generated_cer'])
     for row in metrics['examples']:

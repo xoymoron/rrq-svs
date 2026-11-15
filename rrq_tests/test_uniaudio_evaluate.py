@@ -39,3 +39,31 @@ def test_gate_requires_every_language_and_is_not_intelligibility_claim():
     assert mod.operational_gate({'Chinese':good},thresholds,['Chinese'])
     assert not mod.operational_gate({'Chinese':good},thresholds,['Chinese','English'])
     assert not mod.operational_gate({'Chinese':dict(good,phone_ce_gap=-.1)},thresholds,['Chinese'])
+
+
+def test_chunk_synthesis_uses_annotation_only_and_keeps_final_partial_chunk(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from rrq import uniaudio_data, uniaudio
+    mod = module()
+    phones, midi = torch.arange(5), torch.tensor([60, 61, 62, 63, 64])
+    monkeypatch.setattr(uniaudio_data, 'score_conditions', lambda row, vocab: (phones, midi))
+    seen = []
+    class Data:
+        rows = {'row': {'annotations': 'only'}}
+        vocab = {'tokens': ['<audio_0>']}
+        recipe = {'config': {'max_frames': 2}}
+        def _prefix(self, row, ph, notes, device, ending):
+            seen.append((ph.tolist(), notes.tolist()))
+            return notes[None]
+        def _cached(self, *args):
+            raise AssertionError('must not open target cache')
+    def generate(model, prefix, frames, audio_offset, **kwargs):
+        assert frames <= 2
+        return prefix[None].expand(3, 1, frames)
+    monkeypatch.setattr(uniaudio, 'generate', generate)
+    runtime = SimpleNamespace(device='cpu', amp=nullcontext)
+    output = mod.synthesize({'synthesis_chunk_frames': 2}, Data(), 'row', object(), runtime)
+    assert output.shape == (3, 1, 5)
+    assert output[0, 0].tolist() == [60, 61, 62, 63, 64]
+    assert seen == [([0, 1], [60, 61]), ([2, 3], [62, 63]), ([4], [64])]

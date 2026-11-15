@@ -1,4 +1,4 @@
-"""Frozen, unprompted Chinese ASR diagnostics, calibrated with reference audio."""
+"""Frozen, unprompted multilingual ASR diagnostics with reference calibration."""
 from functools import lru_cache
 import hashlib
 import importlib.metadata
@@ -10,13 +10,18 @@ import unicodedata
 
 from .io import sha256,write_json
 
+LANGUAGES={'Chinese':'zh','English':'en','French':'fr','German':'de',
+           'Italian':'it','Japanese':'ja','Korean':'ko','Russian':'ru','Spanish':'es'}
 
-def normalize(value,converter=None):
-    if converter is None:
+
+def normalize(value,converter=None,language='zh'):
+    if converter is None and language=='zh':
         from opencc import OpenCC
         converter=OpenCC('t2s')
     text=''.join(value) if isinstance(value,list) else value
-    text=converter.convert(unicodedata.normalize('NFKC',re.sub(r'<[^>]*>','',text))).lower()
+    text=unicodedata.normalize('NFKC',re.sub(r'<[^>]*>','',text))
+    if converter is not None:text=converter.convert(text)
+    text=text.lower()
     return ''.join(c for c in text if c.isalnum())
 
 
@@ -35,9 +40,10 @@ def cer(reference,hypothesis):
     return edit_errors(reference,hypothesis)/len(reference)
 
 
-def gate(metrics,thresholds):
+def gate(metrics,thresholds,codec_diagnostic_only=False):
     for key,limit in (('reference_cer','reference_cer_max'),('codec_cer','codec_cer_max'),
                       ('generated_cer','generated_cer_max'),('generated_excess_cer','excess_cer_max')):
+        if key=='codec_cer' and codec_diagnostic_only:continue
         value=metrics.get(key)
         if value is None or not math.isfinite(value) or value>thresholds[limit]:return False
     return True
@@ -57,26 +63,28 @@ def recognizer(folder,device_index):
     return model,contract
 
 
-def transcribe(path,settings,device_index):
+def transcribe(path,settings,device_index,language='zh'):
+    if language not in LANGUAGES.values():raise ValueError('unsupported evaluation language')
     model,contract=recognizer(settings['model_path'],device_index)
+    contract=dict(contract,language=language,normalization='NFKC; '+('t2s; ' if language=='zh' else '')+'lower; alnum; remove annotation tags')
     key=hashlib.sha256(json.dumps([sha256(path),contract],sort_keys=True).encode()).hexdigest()
     cache=Path(settings['cache_path']);cache.mkdir(parents=True,exist_ok=True)
     output=cache/(key+'.json')
     if output.exists():return json.loads(output.read_text()),contract
-    segments,_=model.transcribe(str(path),language='zh',beam_size=5,temperature=0.,
+    segments,_=model.transcribe(str(path),language=language,beam_size=5,temperature=0.,
         vad_filter=False,condition_on_previous_text=False,initial_prompt=None)
     text=''.join(segment.text for segment in segments)
-    result=dict(raw=text,normalized=normalize(text),key=key)
+    result=dict(raw=text,normalized=normalize(text,language=language),key=key)
     write_json(output,result)
     return result,contract
 
 
-def evaluate(lyrics,audio_paths,settings,device_index):
-    reference=normalize(lyrics)
+def evaluate(lyrics,audio_paths,settings,device_index,language='zh'):
+    reference=normalize(lyrics,language=language)
     if not reference:raise ValueError('empty normalized dataset lyrics')
     transcripts={};metrics={};contract=None
     for arm in ('reference','codec','generated'):
-        transcripts[arm],contract=transcribe(audio_paths[arm],settings,device_index)
+        transcripts[arm],contract=transcribe(audio_paths[arm],settings,device_index,language)
         errors=edit_errors(reference,transcripts[arm]['normalized'])
         metrics[arm+'_cer']=errors/len(reference);metrics[arm+'_errors']=errors
     metrics['characters']=len(reference)

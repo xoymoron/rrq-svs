@@ -29,6 +29,7 @@ def evaluation_contract(cfg):
     asr=cfg.get('pronunciation',{})
     identity=dict(version=2,implementation_sha256=sha256(__file__),
                   panel_per_language=cfg.get('validation_per_language',2),pronunciation=asr)
+    identity['synthesis_chunk_frames']=cfg.get('synthesis_chunk_frames',0)
     if asr.get('enabled'):
         from . import pronunciation
         import importlib.metadata
@@ -106,6 +107,23 @@ def clean_ce(data,row_id,model,runtime):
 @torch.inference_mode()
 def synthesize(cfg,data,row_id,model,runtime):
     # This boundary deliberately has no target-cache, latent or waveform access.
+    chunk=cfg.get('synthesis_chunk_frames',0)
+    if chunk:
+        from .uniaudio_data import score_conditions
+        if chunk!=data.recipe['config']['max_frames']:
+            raise ValueError('synthesis chunks must match prepared training length')
+        row=data.rows[row_id];phones,midi=score_conditions(row,data.vocab)
+        codes=[]
+        for start in range(0,len(midi),chunk):
+            stop=min(start+chunk,len(midi))
+            prefix=data._prefix(row,phones[start:stop],midi[start:stop],runtime.device,ending=0)
+            seed=int(hashlib.sha256(f"{cfg.get('seed',17)}:{row_id}:chunk:{start}".encode()).hexdigest()[:15],16)
+            with runtime.amp():
+                codes.append(ua.generate(model,prefix,stop-start,data.vocab['tokens'].index('<audio_0>'),
+                             topk=cfg.get('topk',30),temperature=cfg.get('temperature',.8),seed=seed))
+        # Reset generator context at training-length boundaries, then decode the
+        # concatenated codes once. Boundary quality remains an evaluation item.
+        return torch.cat(codes,dim=-1)
     prefix,frames=data.inference_prefix(row_id,runtime.device)
     with runtime.amp():
         return ua.generate(model,prefix,frames,data.vocab['tokens'].index('<audio_0>'),
@@ -170,10 +188,10 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
             example=dict(id=row_id,language=row['language'],singer=row['singer'],**stats,
                          audio=paths,codec=measure(raw,reconstructed),oracle=oracle,seconds=time.monotonic()-start)
             if cfg.get('pronunciation',{}).get('enabled'):
-                if row['language']!='Chinese':raise ValueError('ASR pronunciation protocol currently supports Chinese only')
                 from . import pronunciation
                 example['pronunciation']=pronunciation.evaluate(row['lyrics'],paths,
-                    dict(model_path=cfg['asr_model_path'],cache_path=cfg['asr_cache_path']),runtime.local_rank)
+                    dict(model_path=cfg['asr_model_path'],cache_path=cfg['asr_cache_path']),runtime.local_rank,
+                    pronunciation.LANGUAGES[row['language']])
             write_json(folder/'metrics.json',example);examples.append(example)
     finally:model.train(was_training)
     examples=sum(runtime.gather(examples),[])
@@ -193,14 +211,16 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
                 sampling=dict(topk=cfg.get('topk',30),temperature=cfg.get('temperature',.8),seed=cfg.get('seed',17)))
     if cfg.get('pronunciation',{}).get('enabled'):
         from . import pronunciation
+        codec_diagnostic_only=cfg['pronunciation'].get('codec_diagnostic_only',False)
         report['pronunciation']=pronunciation.aggregate([r['pronunciation'] for r in examples])
-        report['pronunciation_gate_passed']=pronunciation.gate(report['pronunciation'],cfg['pronunciation']['gate'])
+        report['pronunciation_gate_passed']=pronunciation.gate(report['pronunciation'],cfg['pronunciation']['gate'],codec_diagnostic_only)
+        report['per_language_pronunciation']={language:pronunciation.aggregate([r['pronunciation'] for r in examples if r['language']==language]) for language in languages}
         report['per_singer']={}
         for singer in sorted({r['singer'] for r in examples}):
             rows=[r for r in examples if r['singer']==singer]
             acoustic=mean_maps([{k:v for k,v in r.items() if isinstance(v,(int,float)) or v is None} for r in rows])
             speech=pronunciation.aggregate([r['pronunciation'] for r in rows])
-            passed=operational_gate({singer:acoustic},cfg['gate'],[singer]) and pronunciation.gate(speech,cfg['pronunciation']['gate'])
+            passed=operational_gate({singer:acoustic},cfg['gate'],[singer]) and pronunciation.gate(speech,cfg['pronunciation']['gate'],codec_diagnostic_only)
             report['per_singer'][singer]=dict(acoustic=acoustic,pronunciation=speech,gate_passed=passed)
         report['operational_gate_passed']=report['operational_gate_passed'] and report['pronunciation_gate_passed'] and all(r['gate_passed'] for r in report['per_singer'].values())
         report['quality_limit']='ASR lyric intelligibility proxy with raw/codec controls; not human pronunciation, identity or MOS validation.'
