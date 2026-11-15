@@ -1,4 +1,5 @@
 """Exact causal KV cache for the audited Prompt-Singer architecture."""
+import hashlib
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -109,7 +110,7 @@ class BatchCache:
 
 
 @torch.inference_mode()
-def generate_batch(model,prefixes,prompt,vocab,lengths,coarse=None):
+def generate_batch(model,prefixes,prompt,vocab,lengths,coarse=None,temperature=0.,sample_ids=None,sampling_seed=0):
     if not lengths or len(prefixes)!=len(lengths) or any(t<1 for t in lengths): raise ValueError('invalid batch lengths')
     if any(p.shape[0]!=1 or p.shape[1]%3 or p.shape[1]//3+1+max(lengths)>model.n_ctx for p in prefixes):
         raise ValueError('invalid prefix/context length')
@@ -119,6 +120,15 @@ def generate_batch(model,prefixes,prompt,vocab,lengths,coarse=None):
             raise ValueError('invalid fixed coarse batch')
     starts=[vocab.index[f'aco_{q*1024}'] for q in range(3)]
     if any(vocab.index[f'aco_{i}']!=starts[i//1024]+i%1024 for i in range(3072)): raise ValueError('noncontiguous vocabulary')
+    if temperature<0: raise ValueError('negative temperature')
+    uniforms=None
+    if temperature:
+        if sample_ids is None or len(sample_ids)!=len(lengths): raise ValueError('sampling needs stable sample IDs')
+        draws=[]
+        for item in sample_ids:
+            seed=int.from_bytes(hashlib.sha256(f'{sampling_seed}:{item}'.encode()).digest()[:8],'big')
+            draws.append(np.random.default_rng(seed).random((max(lengths),3)))
+        uniforms=torch.tensor(np.stack(draws),device=prefixes[0].device,dtype=torch.float32)
     model.eval(); cache=BatchCache(model,prefixes,prompt); context=cache.context
     generated=[]
     for t in range(max(lengths)):
@@ -126,7 +136,14 @@ def generate_batch(model,prefixes,prompt,vocab,lengths,coarse=None):
         for q,start in enumerate(starts):
             if q==0 and coarse is not None:
                 current[:,q]=current.new_tensor([int(c[t]) if t<len(c) else 0 for c in coarse])+start
-            else: current[:,q]=patch_logits(model,context,current)[:,q,start:start+1024].argmax(-1)+start
+            else:
+                logits=patch_logits(model,context,current)[:,q,start:start+1024].float()
+                if not torch.isfinite(logits).all(): raise ValueError('nonfinite generation logits')
+                if temperature:
+                    cdf=F.softmax(logits/temperature,dim=-1).cumsum(-1).contiguous()
+                    chosen=torch.searchsorted(cdf,uniforms[:,t,q:q+1].contiguous()).squeeze(-1).clamp_max(1023)
+                else: chosen=logits.argmax(-1)
+                current[:,q]=chosen+start
         generated.append(current-current.new_tensor(starts))
         if t+1<max(lengths): context=cache.append(current)
     array=torch.stack(generated,-1).cpu().numpy()

@@ -98,12 +98,44 @@ def init(args):
         split_ids={s:sorted(r['id'] for r in rows if r['split']==s) for s in ('train','valid','test')},
         conditioning='score_pitch_gt_phone_duration',common_selection='minimum language-macro validation clean CE',
         branch_selection='fixed final epoch 6, no test-based selection',
-        generation='greedy; identical frozen common-model first-codebook sequence for all arms',
+        temperature=.8,sampling_seed=20261115,
+        generation='upstream temperature 0.8; no top-k; item-keyed common random numbers; identical frozen coarse for all arms',
         asr_repo='openai/whisper-large-v3-turbo',asr_revision='41f01f3fe87f28c78e2fbf8b568835947dd65ed9',
         caveats=['Bounded GTSinger pilot; not full-corpus training','Provided phone alignment; not autonomous score-only or zero-shot',
                  'Corpus pretraining overlap and translated song-title aliases unverified','No human listening or MOS'])
     args.root.mkdir(parents=True); atomic_json(args.root/'protocol.json',cfg)
     print('PROTOCOL_LOCKED',json.dumps({s:len(ids) for s,ids in cfg['split_ids'].items()}),flush=True)
+
+
+def revise_sampling(args):
+    """Preserve failed-greedy pilot; import identical common weights into a new protocol."""
+    import shutil
+    if args.root.exists(): raise ValueError('revised experiment root already exists')
+    source=args.from_root
+    cfg=json.loads((source/'protocol.json').read_text())
+    if not (source/'warmup/complete.json').exists(): raise ValueError('source common training incomplete')
+    cfg.update(temperature=.8,sampling_seed=20261115,
+        generation='upstream temperature 0.8; no top-k; item-keyed common random numbers; identical frozen coarse for all arms',
+        parent_protocol_sha256=sha256(source/'protocol.json'),parent_common_sha256=sha256(source/'warmup/best.pt'),
+        revision_reason='Validation greedy code collapse; restore original Prompt-Singer temperature before any test evaluation')
+    args.root.mkdir(parents=True); atomic_json(args.root/'protocol.json',cfg)
+    out=args.root/'warmup'; out.mkdir()
+    state=torch.load(source/'warmup/best.pt',map_location='cpu',weights_only=True)
+    if state['protocol_sha256']!=cfg['parent_protocol_sha256']: raise ValueError('source warmup provenance mismatch')
+    state['protocol_sha256']=sha256(args.root/'protocol.json')
+    state['imported_source_sha256']=cfg['parent_common_sha256']; torch.save(state,out/'best.pt')
+    for name in ('best.json','initial-validation.json','selected-validation.json','status.json'):
+        shutil.copyfile(source/'warmup'/name,out/name)
+    complete=json.loads((source/'warmup/complete.json').read_text())
+    complete.update(protocol_sha256=state['protocol_sha256'],imported_from=str(source.resolve()),
+        note='Identical trained parameter tensors, no additional warmup or test-based selection')
+    atomic_json(out/'complete.json',complete)
+    print('REVISED_SAMPLING_PROTOCOL',str(args.root),flush=True)
+
+
+def sampling_options(ex,batch):
+    return dict(temperature=ex.cfg.get('temperature',0.),sampling_seed=ex.cfg.get('sampling_seed',0),
+                sample_ids=[r['id'] for r in batch])
 
 
 class Experiment:
@@ -303,7 +335,7 @@ def make_targets(args):
       for batch in batches_of_rows(pending):
         prefixes=[pack(r,ex.vocab)[0][None].to(args.device) for r in batch]
         with torch.autocast('cuda',dtype=torch.bfloat16):
-            predictions=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch])
+            predictions=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch],**sampling_options(ex,batch))
         for row,predicted in zip(batch,predictions):
             path=out/(safe_id(row['id'])+'.npz')
             pcm,_,_=prepare_audio(row['audio'],1.)
@@ -337,7 +369,8 @@ def render(args):
     out=args.root/'renders'/args.split/label; out.mkdir(parents=True,exist_ok=True)
     checkpoint_hash=sha256(args.root/'warmup/best.pt') if args.variant=='common' else (
         sha256(args.root/f'{args.variant}-{args.seed}/final.pt') if args.variant in ARMS else ex.cfg['base_sha256'])
-    provenance=dict(protocol_sha256=ex.protocol_hash,checkpoint_sha256=checkpoint_hash,variant=label,generation='batched-kv-v1')
+    provenance=dict(protocol_sha256=ex.protocol_hash,checkpoint_sha256=checkpoint_hash,variant=label,
+        generation='batched-kv-v2',temperature=ex.cfg.get('temperature',0.))
     vocoder=load_vocoder(ex.cfg['assets']/'vocoder_24k/g_00885000',args.device)
     rows=ex.split(args.split)
     pending=[r for r in rows if not render_pair_valid(out/(r['id']+'.wav'),r['n_frames'],provenance)]
@@ -355,7 +388,7 @@ def render(args):
                     with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f: coarse.append(f['predicted'][0].copy())
             prefixes=[pack(r,ex.vocab)[0][None].to(args.device) for r in batch]
             with torch.autocast('cuda',dtype=torch.bfloat16):
-                generated=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch],coarse)
+                generated=generate_batch(ex.model,prefixes,ex.prompt,ex.vocab,[r['n_frames'] for r in batch],coarse,**sampling_options(ex,batch))
         for row,codes in zip(batch,generated):
             path=out/(row['id']+'.wav')
             with torch.inference_mode(): wave=vocoder(torch.from_numpy(codes)[None].to(args.device))[0,0].float().cpu().numpy()
@@ -376,13 +409,14 @@ def main():
     sub=p.add_subparsers(dest='command',required=True)
     q=sub.add_parser('init')
     for name in ('bundle','assets','prompt','cache'): q.add_argument('--'+name,type=Path,required=True)
+    q=sub.add_parser('revise-sampling'); q.add_argument('--from-root',type=Path,required=True)
     q=sub.add_parser('train'); q.add_argument('--stage',choices=['warmup','branch'],required=True)
     q.add_argument('--arm',choices=ARMS,default='baseline'); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
     sub.add_parser('targets')
     q=sub.add_parser('render'); q.add_argument('--variant',choices=['initial','common',*ARMS],required=True)
     q.add_argument('--split',choices=['valid','test'],required=True); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
     args=p.parse_args(); torch.set_num_threads(2); torch.manual_seed(17)
-    dict(init=init,train=train,targets=make_targets,render=render)[args.command](args)
+    {'init':init,'revise-sampling':revise_sampling,'train':train,'targets':make_targets,'render':render}[args.command](args)
 
 
 if __name__=='__main__': main()

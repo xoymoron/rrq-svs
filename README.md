@@ -449,7 +449,7 @@ retains `multilingual-data`, `multilingual-train` and `multilingual-full` window
 ### Full matched comparison (separate from smoke)
 
 `rrq.experiment` uses all 472 primary training phrases, 50 validation phrases and
-54 test phrases. `artifacts/matched-v1/protocol.json` locks their IDs and hashes,
+54 test phrases. `artifacts/matched-v2/protocol.json` locks their IDs and hashes,
 conditioning, optimizer settings, seeds and budgets before training. Eight common
 adaptation epochs update new input rows, the last two global/local blocks, the
 global-to-local projection and output head. Old input rows remain fixed. The
@@ -469,6 +469,9 @@ codebook. Training reads only training-item caches.
 generates the same first-codebook sequence for every arm. Each arm generates its
 own suffix autoregressively while that sequence is fixed. It therefore isolates
 suffix adaptation; it is not the earlier shared-model/free-first-codebook smoke.
+Generation uses the original Prompt-Singer temperature **0.8**, no top-k, and
+item-keyed uniform draws shared across arms. This avoids changing samples when
+workers resume or batch composition changes (up to ordinary floating-point effects).
 Ground-truth waveform is used for training labels and evaluation, never to predict
 the inference first codebook. Note pitches and provided phone durations remain
 annotation assistance. This is not a zero-shot singer-cloning benchmark.
@@ -486,13 +489,13 @@ bootstrap intervals. None is a listening test or MOS estimate.
 
 ```bash
 # Inside tmux; start once with a fresh root. Models and codec caches already exist.
-python -m rrq.experiment --root artifacts/matched-v1 init \
+python -m rrq.experiment --root artifacts/matched-v2 init \
   --bundle ../data/multilingual --assets artifacts/pretrained \
   --prompt artifacts/multilingual-prompt.pt --cache ../data/multilingual/codec-cache
-python -u -m rrq.experiment_schedule --root artifacts/matched-v1 \
+python -u -m rrq.experiment_schedule --root artifacts/matched-v2 \
   --asr artifacts/whisper-turbo 2>&1 | tee ../logs/compare-pipeline.log
 # A second tmux window:
-python -m rrq.experiment_monitor --root artifacts/matched-v1
+python -m rrq.experiment_monitor --root artifacts/matched-v2
 ```
 
 The scheduler assigns at most one job to each GPU, resumes completed epochs and
@@ -504,3 +507,11 @@ tests compare serial/batched causal generation with unequal prefix lengths.
 exist and the matched training schedules pass an audit. A running job is not a
 completed comparison, and limited-data gains are not evidence of convergence or
 full-corpus/pretraining-disjoint generalization.
+
+The earlier `matched-v1` greedy pilot is retained as a failed validation sanity
+check, not as the matched result: it collapsed to a handful of codec IDs and had
+poor lyric CER. Before any test evaluation, v2 restored upstream sampling. The
+common multilingual checkpoint is imported with identical parameter tensors and
+explicit parent hashes via `revise-sampling --from-root artifacts/matched-v1`;
+all affected prediction caches and branch training are rebuilt. This correction
+does not itself establish that multilingual pronunciation is adequate.

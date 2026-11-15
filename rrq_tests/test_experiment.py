@@ -110,3 +110,16 @@ def test_render_pair_requires_codes_and_matching_provenance(tmp_path):
     assert render_pair_valid(wave,3,{'protocol_sha256':'p'})
     assert not render_pair_valid(wave,3,{'protocol_sha256':'wrong'})
     assert not render_pair_valid(wave,4,{'protocol_sha256':'p'})
+
+
+def test_sampling_reproducible_per_item_across_batch_composition():
+    from rrq.cached_ar import generate_batch
+    from rrq.multilingual import Vocabulary
+    vocab=Vocabulary(['x']+[f'aco_{i}' for i in range(3072)])
+    model=tiny(len(vocab.tokens)); prompt=torch.zeros(1,3,8)
+    p=[torch.ones(1,30,dtype=torch.long),torch.ones(1,42,dtype=torch.long)]
+    both=generate_batch(model,p,prompt,vocab,[5,4],temperature=.8,sample_ids=['a','b'],sampling_seed=7)
+    alone=generate_batch(model,[p[1]],prompt,vocab,[4],temperature=.8,sample_ids=['b'],sampling_seed=7)
+    assert np.array_equal(both[1],alone[0])
+    changed=generate_batch(model,[p[1]],prompt,vocab,[4],temperature=.8,sample_ids=['b'],sampling_seed=8)
+    assert not np.array_equal(alone[0],changed[0])
