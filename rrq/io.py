@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import os
 
 import numpy as np
 
@@ -16,7 +17,10 @@ def sha256(path):
 
 
 def write_json(path, value):
-    Path(path).write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    path=Path(path)
+    temp=path.with_name(path.name+f'.{os.getpid()}.tmp')
+    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    temp.replace(path)
 
 
 def safe_id(value):

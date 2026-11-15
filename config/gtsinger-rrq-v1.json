@@ -1,0 +1,21 @@
+{
+  "seed": 17,
+  "world_size": 2,
+  "model": {"dim": 384, "layers": 6, "heads": 4, "dropout": 0.1},
+  "common_epochs": 20,
+  "branch_epochs": 10,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.01,
+  "gradient_accumulation": 4,
+  "gradient_clip": 1.0,
+  "predicted_prefix_probability": 0.5,
+  "chinese_sampling_weight": 0.25,
+  "validation_panel_per_language": 8,
+  "selection_metric": "mrstft_spectral_convergence",
+  "gate_relative_sc": 0.9,
+  "gate_min_condition_gap": 0.001,
+  "gate_min_languages": 7,
+  "sample_weighting": "language weighted, singer uniform, phrase uniform; with replacement",
+  "loss_weighting": "equal codebook and phrase weight; coarse target always native",
+  "replication_seeds_after_feasibility": [29, 43]
+}

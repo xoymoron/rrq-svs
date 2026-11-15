@@ -13,6 +13,7 @@ from .io import safe_id
 
 def annotation_hash(row):
     payload={k:row[k] for k in ('phones','phone_durations','score','language','singer','split')}
+    payload['techniques']=row.get('techniques')
     return hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 
@@ -57,9 +58,9 @@ def frame_condition(row, frames, samples, sr, hop):
 
 
 def inventory(rows):
-    # Transductive annotation inventory is disclosed; no acoustic statistics.
+    # Callers choose train-only rows. Unknown held-out phones use a declared UNK.
     return {key: sorted(set(values)) for key,values in {
-        'phones':[r['language']+'::'+p for r in rows for p in r['phones']],
+        'phones':['<UNK>']+[r['language']+'::'+p for r in rows for p in r['phones']],
         'singers':[r['singer'] for r in rows],
         'languages':[r['language'] for r in rows]}.items()}
 
@@ -67,10 +68,13 @@ def inventory(rows):
 def score_batch(row, cache, vocab, device):
     maps = {k:{v:i for i,v in enumerate(values)} for k,values in vocab.items()}
     notes = row['score'].get('ep_pitches',row['score'].get('notes'))
-    values = dict(phones=[maps['phones'][row['language']+'::'+p] for p in row['phones']],
+    values = dict(phones=[maps['phones'].get(row['language']+'::'+p,maps['phones'].get('<UNK>')) for p in row['phones']],
         midi=notes,durations=row['phone_durations'],frame_index=cache['frame_index'].tolist())
     batch = {k:torch.tensor([v],device=device,dtype=torch.float32 if k=='durations' else torch.long)
              for k,v in values.items()}
     batch.update(singer=torch.tensor([maps['singers'][row['singer']]],device=device),
                  language=torch.tensor([maps['languages'][row['language']]],device=device))
+    if row.get('techniques'):
+        keys=('mix_tech','falsetto_tech','breathy_tech','pharyngeal_tech','vibrato_tech','glissando_tech')
+        batch['techniques']=torch.tensor([[list(v) for v in zip(*(row['techniques'][k] for k in keys))]],device=device,dtype=torch.float32)
     return batch

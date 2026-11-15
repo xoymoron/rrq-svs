@@ -1,0 +1,25 @@
+{
+  "policy": "Conservative families reviewed from the complete source title inventory; grouping may merge uncertain translations rather than risk leakage. Not a universal composition-ID annotation.",
+  "groups": [
+    ["Love Story", "love stroy"],
+    ["Let It Go", "lettitgo", "liberee,delivree", "Lass Jetzt Los"],
+    ["All of Me", "Todo de mi", "tododemi"],
+    ["Look What You Make Me Do", "look what you made me do"],
+    ["My Heart Will Go On", "Weil Mein Herz Dich Nie Mehr Vergisst"],
+    ["somewhere over the rainbow", "Überm Regenbogen"],
+    ["la chanson de la mer", "la chant de la mer"],
+    ["o souverain", "souverain"],
+    ["Am Feierabend", "Am Fererabend"],
+    ["O sole che sorgi da Gange", "gia il sole dal gange"],
+    ["愛してる", "爱してる"],
+    ["后来", "未来へ"],
+    ["最初的梦想", "銀の龍の背に乗って"],
+    ["EYES, NOSE, LIPS", "눈, 코, 입"],
+    ["Аня Облонская", "Аня Облонская 2"],
+    ["Если тебя со мною не", "Если тебя со мною нет"],
+    ["Зачем", "Зачем 2"],
+    ["Свободна и счастье", "Свободна и счастье 2"],
+    ["Profundo yo cai", "Rrofundo yo cai", "Rolling in the Deep"],
+    ["memory", "Memoria"]
+  ]
+}

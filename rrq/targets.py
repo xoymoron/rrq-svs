@@ -2,6 +2,20 @@
 import torch
 
 
+def preserve_clean_frames(clean,predicted,corrected):
+    """Only relabel changed-prefix frames; isolate native STE rounding artifacts."""
+    return torch.where(predicted[:1]==clean[:1],clean,corrected)
+
+
+def training_pair(clean, predicted, corrected, arm, use_predicted):
+    context = training_map(clean, predicted, corrected,
+                           'clean' if arm == 'baseline' else arm, use_predicted)
+    labels = context.clone()
+    # The forced prediction is an input intervention, never a coarse target.
+    labels[0] = clean[0]
+    return context, labels
+
+
 def training_map(clean, predicted, corrected, arm, use_predicted):
     if clean.shape != predicted.shape or clean.shape != corrected.shape or clean.ndim != 3:
         raise ValueError('maps must have identical [Q,B,T] shapes')
