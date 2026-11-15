@@ -445,3 +445,62 @@ Its purpose is to verify the training path, not compare training strategies.
 The validation CE entries in reports are runtime checks, not perceptual results.
 Logs are in `~/SVS/logs/multilingual-*.log`. The existing `svs-rrq` tmux session
 retains `multilingual-data`, `multilingual-train` and `multilingual-full` windows.
+
+### Full matched comparison (separate from smoke)
+
+`rrq.experiment` uses all 472 primary training phrases, 50 validation phrases and
+54 test phrases. `artifacts/matched-v1/protocol.json` locks their IDs and hashes,
+conditioning, optimizer settings, seeds and budgets before training. Eight common
+adaptation epochs update new input rows, the last two global/local blocks, the
+global-to-local projection and output head. Old input rows remain fixed. The
+minimum language-macro validation CE selects the common checkpoint; the test set
+does not select epochs or hyperparameters.
+
+Each baseline/exposure/RRQ run starts from that exact common checkpoint and trains
+the same last two local blocks, projection and output head for **six full epochs**.
+There are three paired seeds (17, 29, 43), with identical per-epoch data order,
+AdamW learning rate 2e-5, weight decay 0.01, clipping 1.0 and suffix-only CE.
+Exposure/RRQ share each per-epoch/per-item Bernoulli mixture draw at rho=0.5.
+Baseline uses clean codec maps; exposure changes the first codebook while keeping
+clean suffix labels; RRQ recomputes suffix labels against the same predicted first
+codebook. Training reads only training-item caches.
+
+**This comparison uses two-pass conditional refinement:** a frozen common model
+generates the same first-codebook sequence for every arm. Each arm generates its
+own suffix autoregressively while that sequence is fixed. It therefore isolates
+suffix adaptation; it is not the earlier shared-model/free-first-codebook smoke.
+Ground-truth waveform is used for training labels and evaluation, never to predict
+the inference first codebook. Note pitches and provided phone durations remain
+annotation assistance. This is not a zero-shot singer-cloning benchmark.
+
+Evaluation uses every validation/test phrase, not shortest selected examples:
+initial versus adapted validation CE, reversed-phone sensitivity, generated audio
+MR-STFT, WORLD DIO+StoneMask F0/voicing, and fixed multilingual Whisper CER. Original
+audio and native codec reconstructions are ASR controls. The recognizer is pinned
+to `openai/whisper-large-v3-turbo` revision
+`41f01f3fe87f28c78e2fbf8b568835947dd65ed9`; no lyric prompt is given to ASR.
+CER normalizes NFKC, case and non-alphanumeric characters and can exceed 1.
+ASR errors on original singing must be considered before interpreting CER.
+Results include per-language metrics, three-seed SD and paired song-cluster
+bootstrap intervals. None is a listening test or MOS estimate.
+
+```bash
+# Inside tmux; start once with a fresh root. Models and codec caches already exist.
+python -m rrq.experiment --root artifacts/matched-v1 init \
+  --bundle ../data/multilingual --assets artifacts/pretrained \
+  --prompt artifacts/multilingual-prompt.pt --cache ../data/multilingual/codec-cache
+python -u -m rrq.experiment_schedule --root artifacts/matched-v1 \
+  --asr artifacts/whisper-turbo 2>&1 | tee ../logs/compare-pipeline.log
+# A second tmux window:
+python -m rrq.experiment_monitor --root artifacts/matched-v1
+```
+
+The scheduler assigns at most one job to each GPU, resumes completed epochs and
+verified render pairs, and propagates stage failures. `last.pt` includes optimizer
+state; validation-best recovery handles interruption between checkpoint writes.
+Batch KV generation preserves real position IDs and masks left padding; regression
+tests compare serial/batched causal generation with unequal prefix lengths.
+`comparison.json` and `comparison.csv` are created only after all planned test arms
+exist and the matched training schedules pass an audit. A running job is not a
+completed comparison, and limited-data gains are not evidence of convergence or
+full-corpus/pretraining-disjoint generalization.

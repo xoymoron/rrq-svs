@@ -17,6 +17,8 @@ from .multilingual import read_rows
 from .pipeline import prepare_audio
 from .upstream import load_codec, load_vocoder
 
+ASR_SHA256='542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1'
+
 
 def text_normalize(text):
     return ''.join(c for c in unicodedata.normalize('NFKC',text).casefold() if c.isalnum())
@@ -85,6 +87,7 @@ def evaluate(args):
     del vocoder
     from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
     asr_hash=sha256(args.asr/'model.safetensors')
+    if asr_hash!=ASR_SHA256: raise ValueError('ASR weights differ from pinned official revision')
     processor=AutoProcessor.from_pretrained(args.asr,local_files_only=True)
     asr=AutoModelForSpeechSeq2Seq.from_pretrained(args.asr,local_files_only=True,torch_dtype=torch.float16,
         attn_implementation='sdpa').to(args.device).eval().requires_grad_(False)

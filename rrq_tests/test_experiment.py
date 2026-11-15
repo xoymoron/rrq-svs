@@ -99,7 +99,14 @@ def test_resume_recovers_unpublished_best_from_last(tmp_path):
 
 
 def test_render_pair_requires_codes_and_matching_provenance(tmp_path):
+    import json
     import soundfile as sf
     from rrq.experiment import render_pair_valid
+    from rrq.io import sha256
     wave=tmp_path/'x.wav'; sf.write(wave,np.zeros(480*3),24000,subtype='FLOAT')
     assert not render_pair_valid(wave,3,{'protocol_sha256':'p'})
+    np.savez(wave.with_suffix('.npz'),codes=np.zeros((3,3),dtype=np.int64),
+             metadata=np.array(json.dumps(dict(protocol_sha256='p',waveform_sha256=sha256(wave)))))
+    assert render_pair_valid(wave,3,{'protocol_sha256':'p'})
+    assert not render_pair_valid(wave,3,{'protocol_sha256':'wrong'})
+    assert not render_pair_valid(wave,4,{'protocol_sha256':'p'})
