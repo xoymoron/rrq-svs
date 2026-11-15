@@ -154,6 +154,8 @@ def main():
                         future.result()
                     except Exception as exc:
                         failures.append(dict(path=entry['path'], error=str(exc)))
+                        if len(failures) <= 5:
+                            tqdm.write('Download failure: ' + json.dumps(failures[-1], ensure_ascii=False))
                     else:
                         complete += 1
                         verified_bytes += entry['size']
@@ -166,6 +168,7 @@ def main():
                                       elapsed_seconds=now-started, complete=complete == len(files))
                         bar.set_postfix(verified_GiB=f'{verified_bytes / 1024**3:.2f}', errors=len(failures))
                         write_json(root / 'download-status.json', status)
+                        write_json(root / 'download-failures.json', failures)
                         if run:
                             run.log({'download/' + k: v for k, v in status.items()})
                         last = now
