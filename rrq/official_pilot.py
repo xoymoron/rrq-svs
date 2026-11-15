@@ -36,9 +36,11 @@ def atomic_torch(path, data):
 def select_panel(rows, split, per_language):
     selected=[]
     for language in sorted({r['language'] for r in rows}):
-        candidates=[r for r in rows if r['split']==split and r['language']==language and 2<=r['audio_seconds']<=6]
+        # Corpus inspection: French/Italian have no <=6 s training phrases.
+        # Retain every language and whole phrases, without cropping annotations.
+        candidates=[r for r in rows if r['split']==split and r['language']==language and 2<=r['audio_seconds']<=12]
         by_singer=defaultdict(list)
-        for row in sorted(candidates,key=lambda r:r['id']):
+        for row in sorted(candidates,key=lambda r:(r['audio_seconds'],r['id'])):
             by_singer[row['singer']].append(row)
         ordered=[]
         while any(by_singer.values()):
