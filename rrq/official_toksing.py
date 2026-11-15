@@ -66,6 +66,17 @@ class PrefixProjection(nn.Module):
         for embedding in self.prefix_embeddings:
             nn.init.zeros_(embedding.weight)
         self.context = None
+        self.forced_prefix = None
+
+    @contextmanager
+    def force_prefix(self, codes):
+        if self.context is not None or self.forced_prefix is not None:
+            raise RuntimeError('nested prefix context is not supported')
+        self.forced_prefix = codes
+        try:
+            yield
+        finally:
+            self.forced_prefix = None
 
     @contextmanager
     def conditioning(self, codes):
@@ -79,6 +90,12 @@ class PrefixProjection(nn.Module):
 
     def forward(self, hidden):
         context = self.context
+        forced = self.forced_prefix
+        if forced is not None:
+            if (forced.ndim!=3 or forced.shape[0]!=hidden.shape[0] or forced.shape[2]!=hidden.shape[1]
+                    or not 1<=forced.shape[1]<self.codebooks or forced.dtype!=torch.long
+                    or (forced<0).any() or (forced>=self.entries).any()):
+                raise ValueError('forced prefix must be valid [B,K,T], 1 <= K < Q')
         if context is not None:
             if (context.ndim != 3 or context.shape != (hidden.shape[0], self.codebooks, hidden.shape[1])
                     or context.dtype != torch.long or (context < 0).any() or (context >= self.entries).any()):
@@ -90,7 +107,8 @@ class PrefixProjection(nn.Module):
             value = F.linear(hidden+prefix, self.projection.weight[start:end], self.projection.bias[start:end])
             outputs.append(value)
             if q < self.codebooks-1:
-                token = context[:, q] if context is not None else value.argmax(-1)
+                token = (forced[:,q] if forced is not None and q<forced.shape[1]
+                         else context[:, q] if context is not None else value.argmax(-1))
                 prefix = prefix + self.prefix_embeddings[q](token)
         return torch.cat(outputs, dim=-1)
 
@@ -158,9 +176,13 @@ class OfficialTokSing(nn.Module):
         return dict(loss=loss, stats=stats, logits=logits.view(b,t,self.codebooks,self.entries).permute(0,2,1,3))
 
     @torch.no_grad()
-    def generate(self, *, phones, midi, durations, singer, language, use_supplied_duration=True):
+    def generate(self, *, phones, midi, durations, singer, language, use_supplied_duration=True,
+                 forced_prefix=None):
+        from contextlib import nullcontext
         score = dict(phones=phones,midi=midi,durations=durations,singer=singer,language=language)
         self._validate_score(score)
+        if forced_prefix is not None and not self.prefix_conditioning:
+            raise ValueError('common-prefix diagnostic requires a prefix-conditioned model')
         # Controlled acoustic SVS: supply annotation timing, NEVER target LF0 or tokens.
         # The official duration predictor is retained/trained; unforced generation
         # remains available. The hook changes only LR's duration input for this call.
@@ -168,13 +190,20 @@ class OfficialTokSing(nn.Module):
         if use_supplied_duration:
             hook = self.base.length_regulator.register_forward_pre_hook(lambda _, args: (args[0], durations, *args[2:]))
         try:
-            out = self.base.inference(text=phones, label={'score':phones}, melody={'score':midi},
-                                      duration={'score_syb':durations,'lab':durations},
-                                      sids=singer,lids=language,use_teacher_forcing=False)
+            manager=(self.base.linear_projection.force_prefix(forced_prefix)
+                     if forced_prefix is not None else nullcontext())
+            with manager:
+                out = self.base.inference(text=phones, label={'score':phones}, melody={'score':midi},
+                                          duration={'score_syb':durations,'lab':durations},
+                                          sids=singer,lids=language,use_teacher_forcing=False)
         finally:
             if hook is not None:
                 hook.remove()
         codes = out['feat_gen'].reshape(-1,self.codebooks).T.unsqueeze(0).long()
+        if forced_prefix is not None:
+            # Diagnostic only: common MODEL prediction, never reference codes.
+            # This clamp is not used by primary free generation.
+            codes[:,:forced_prefix.shape[1]]=forced_prefix
         return dict(codes=codes, lf0=out['pitch'], logits=out['logits'])
 
     def parameter_report(self):

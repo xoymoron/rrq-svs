@@ -82,3 +82,17 @@ def test_original_import_is_pinned_and_source_tree_clean():
     assert p['commit'] == '5f142ef90bf87ee0f4c2d6907f7a9462b3854316'
     assert p['modified_tracked_files'] == []
     assert p['toksing_sha256']
+
+
+def test_common_predicted_prefix_is_used_in_suffix_generation_and_cleaned_up():
+    torch.manual_seed(17)
+    m = OfficialTokSing(tiny(), prefix_conditioning=True).eval()
+    for emb in m.base.linear_projection.prefix_embeddings:
+        torch.nn.init.normal_(emb.weight, std=.3)
+    a = m.generate(**sample())
+    prefix = (a['codes'][:,:1] + 1) % 8
+    b = m.generate(**sample(), forced_prefix=prefix)
+    torch.testing.assert_close(b['codes'][:,:1], prefix)
+    assert not torch.allclose(a['logits'].view(7,3,8)[:,1:], b['logits'].view(7,3,8)[:,1:])
+    c = m.generate(**sample())
+    torch.testing.assert_close(a['codes'],c['codes'])

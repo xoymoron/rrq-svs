@@ -261,7 +261,7 @@ def train(args):
             out['loss'].backward();norm=torch.nn.utils.clip_grad_norm_(m.parameters(),1.,error_if_nonfinite=True);opt.step()
             step+=1;losses.append(float(out['loss'].detach()))
             if d.primary:
-                bar.set_postfix(loss=f'{losses[-1]:.3f}',pitch=f'{out["stats"]["pitch_loss"]:.3f}')
+                bar.set_postfix(loss=f'{losses[-1]:.3f}',pitch=f'{out["stats"]["pitch_loss"].item():.3f}')
                 if step%20==0:run.log({'pilot/step':step,'epoch':epoch,'train/loss':losses[-1],
                                       'train/grad_norm':float(norm),**{'train/'+k:float(v) for k,v in out['stats'].items()}})
         values=d.gather(losses)
