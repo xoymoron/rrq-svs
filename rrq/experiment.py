@@ -344,15 +344,16 @@ def make_targets(args):
     ex=Experiment(args.root,args.device); ex.load(args.root/'warmup/best.pt'); ex.model.requires_grad_(False)
     out=args.root/'targets'; out.mkdir(exist_ok=True); common_hash=sha256(args.root/'warmup/best.pt')
     codec=load_codec(ex.cfg['assets']/'codec/ckpt_01135000.pth',args.device)
+    selected=ex.split(args.split) if getattr(args,'split',None) else ex.rows
     pending=[]
-    for row in ex.rows:
+    for row in selected:
         path=out/(safe_id(row['id'])+'.npz')
         if path.exists():
             with np.load(path,allow_pickle=False) as f: meta=json.loads(str(f['metadata'].item()))
             if meta['common_sha256']!=common_hash or meta['audio_sha256']!=row['audio_sha256'] or meta['protocol_sha256']!=ex.protocol_hash:
                 raise ValueError('stale target cache')
         else: pending.append(row)
-    done=len(ex.rows)-len(pending)
+    done=len(selected)-len(pending)
     with torch.inference_mode():
       for batch in batches_of_rows(pending):
         prefixes=[pack(r,ex.vocab)[0][None].to(args.device) for r in batch]
@@ -374,10 +375,11 @@ def make_targets(args):
                 latent=z[0].float().cpu().numpy(),metadata=np.array(json.dumps(meta)))
             tmp.replace(path)
             done+=1
-            print('TARGETS',done,len(ex.rows),row['language'],row['id'],flush=True)
-            atomic_json(out/'status.json',dict(done=done,total=len(ex.rows),last_id=row['id']))
-    atomic_json(out/'index.json',dict(common_sha256=common_hash,protocol_sha256=ex.protocol_hash,
-        split_ids=ex.cfg['split_ids'],count=len(ex.rows)))
+            print('TARGETS',done,len(selected),row['language'],row['id'],flush=True)
+            atomic_json(out/'status.json',dict(done=done,total=len(selected),last_id=row['id'],split=getattr(args,'split',None)))
+    if not getattr(args,'split',None):
+        atomic_json(out/'index.json',dict(common_sha256=common_hash,protocol_sha256=ex.protocol_hash,
+            split_ids=ex.cfg['split_ids'],count=len(ex.rows)))
     print('TARGETS_COMPLETE',flush=True)
 
 
@@ -434,7 +436,7 @@ def main():
     q=sub.add_parser('revise-sampling'); q.add_argument('--from-root',type=Path,required=True)
     q=sub.add_parser('train'); q.add_argument('--stage',choices=['warmup','branch'],required=True)
     q.add_argument('--arm',choices=ARMS,default='baseline'); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
-    sub.add_parser('targets')
+    q=sub.add_parser('targets'); q.add_argument('--split',choices=['train','valid','test'])
     q=sub.add_parser('render'); q.add_argument('--variant',choices=['initial','common',*ARMS],required=True)
     q.add_argument('--split',choices=['valid','test'],required=True); q.add_argument('--seed',type=int,choices=SEEDS,default=17)
     args=p.parse_args(); torch.set_num_threads(2); torch.manual_seed(17)
