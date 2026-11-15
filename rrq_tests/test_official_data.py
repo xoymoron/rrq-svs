@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 import torch
-from rrq.official_data import duration_counts, score_inputs, synthesis_gate, continuous_lf0
+from rrq.official_data import duration_counts, score_inputs, synthesis_gate, continuous_lf0, paired_pitch_metrics
 
 
 def test_counts_preserve_codec_clock_with_zero_length_phone_and_endpoint_padding():
@@ -37,3 +37,9 @@ def test_lf0_keeps_official_continuous_interpolation_without_changing_raw_voicin
     np.testing.assert_allclose(result, np.log([100.,100.,150.,200.]), rtol=1e-6)
     assert raw.tolist() == [0.,100.,0.,200.,0.]
     np.testing.assert_array_equal(continuous_lf0(np.zeros(5),4), np.zeros(4))
+
+
+def test_lost_voicing_cannot_masquerade_as_paired_pitch_improvement():
+    a,b=paired_pitch_metrics([100.,200.],[100.,100.],[100.,0.])
+    assert a['common_support_f0_rmse_cents']==b['common_support_f0_rmse_cents']==0.
+    assert a['common_support_reference_voiced_coverage']==.5

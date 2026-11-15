@@ -61,6 +61,19 @@ def pitch_metrics(reference, generated):
                 voicing_error=float(np.mean(av!=bv)),joint_voiced_fraction=float(joint.mean()))
 
 
+def paired_pitch_metrics(reference, first, second):
+    """Compare errors on the SAME voiced frames; report lost coverage separately."""
+    a,b,c=(np.asarray(x) for x in (reference,first,second))
+    if a.shape!=b.shape or a.shape!=c.shape: raise ValueError('pitch clock mismatch')
+    mask=(a>0)&(b>0)&(c>0)
+    coverage=float(mask.sum()/max(1,(a>0).sum()))
+    def metrics(x):
+        cents=1200*np.log2(x[mask]/a[mask])
+        return dict(common_support_f0_rmse_cents=float(np.sqrt(np.mean(cents*cents))) if mask.any() else None,
+                    common_support_reference_voiced_coverage=coverage)
+    return metrics(b),metrics(c)
+
+
 def synthesis_gate(metrics):
     # Frozen operational pilot thresholds; passing is NOT a MOS/intelligibility claim.
     thresholds=dict(sc_max=.9,f0_rmse_cents_max=300.,within_50_cents_min=.5,

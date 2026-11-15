@@ -44,6 +44,14 @@ automatic full-corpus launch; pitch/spectral success alone cannot prove lyric
 intelligibility or RRQ benefit. Source review and measured feasibility must
 precede a full experiment.
 
+After a bounded run completes, `python -m rrq.official_oracle --output
+artifacts/official-pilot --mode prefix` measures actual predicted-q0 repair
+without starting training. It saves every paired waveform and compares latent
+error, waveform spectra, voicing, and pitch on common voiced frames. This oracle
+uses reference latents and does not demonstrate learned correction. A separate
+`forced_prefix` generation option supports common-model-prefix diagnostics;
+primary inference leaves it unset and generates every codebook itself.
+
 ## Historical custom DAC experiment (inactive)
 
 Historical scope: GTSinger singing only; no AIHub audio. This was a custom
