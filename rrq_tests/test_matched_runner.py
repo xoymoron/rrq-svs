@@ -106,3 +106,20 @@ def test_changing_imported_selection_code_invalidates_protocol(tmp_path,monkeypa
     monkeypatch.setattr(module,'sha256',lambda p:'changed' if Path(p).name=='toksing_run.py' else original(p))
     with pytest.raises(ValueError,match='protocol mismatch'):
         Experiment(e.prepared,e.root,e.codec,tmp_path/'config.json')
+
+
+def test_resumed_cache_still_reports_reconstruction_on_validation_only(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    import numpy as np
+    e=make_experiment(tmp_path)
+    for row in e.rows:row['audio']='fixture.wav'
+    audio=np.sin(np.arange(2048)*2*np.pi*220/44100).astype(np.float32)
+    codec=SimpleNamespace(sample_rate=44100,decode=lambda codes,samples:torch.from_numpy(audio)[None,None])
+    monkeypatch.setattr(runner,'FrozenDAC',lambda *a:codec)
+    monkeypatch.setattr(runner,'sha256',lambda path:'fixture')
+    monkeypatch.setattr(runner,'load_audio',lambda *a:audio.copy())
+    runner.cache_stage(e,Distributed(),torch.device('cpu'))
+    report=json.loads((e.root/'codec-reconstruction.json').read_text())
+    assert [r['id'] for r in report['samples']]==['item-2']
+    assert report['language_macro']['codec']['mrstft_spectral_convergence']==0
+    assert report['protocol_sha256']==e.hash

@@ -37,26 +37,39 @@ def seed_epoch(seed,epoch,rank):
 
 
 def cache_stage(e,d,device):
-    codec=FrozenDAC(e.codec,device);records=[]
+    codec=FrozenDAC(e.codec,device);records=[];reconstruction=[]
     for row in tqdm(shard(e.rows,d.rank,d.world),desc=f'codec cache GPU{d.rank}',mininterval=2):
         if sha256(row['audio'])!=row['source_sha256']:raise ValueError('source changed after preparation')
         path=e.cache/(row['id']+'.pt')
         if path.exists():
-            c=e.read_cache(row);records.append(dict(id=row['id'],frames=c['codes'].shape[-1]));continue
-        x=load_audio(row['audio'],codec.sample_rate)
-        z,codes=codec.encode(torch.from_numpy(x)[None,None].to(device))
-        cond=frame_condition(row,z.shape[-1],len(x),codec.sample_rate,codec.hop)
-        audit=clean_prefix_audit(z,codes,codec.layers) if row['id'] in e.panels['valid'] else None
-        atomic_save(dict(id=row['id'],codes=codes.cpu().short(),
-            frame_index=torch.from_numpy(cond['phone_index']).int(),samples=len(x),sample_rate=codec.sample_rate,
-            hop=codec.hop,codec_sha256=codec.fingerprint,source_sha256=row['source_sha256'],
-            annotation_sha256=annotation_hash(row),clean_prefix_audit=audit),path)
-        records.append(dict(id=row['id'],frames=codes.shape[-1]))
+            c=e.read_cache(row)
+        else:
+            x=load_audio(row['audio'],codec.sample_rate)
+            z,codes=codec.encode(torch.from_numpy(x)[None,None].to(device))
+            cond=frame_condition(row,z.shape[-1],len(x),codec.sample_rate,codec.hop)
+            audit=clean_prefix_audit(z,codes,codec.layers) if row['id'] in e.panels['valid'] else None
+            c=dict(id=row['id'],codes=codes.cpu().short(),
+                frame_index=torch.from_numpy(cond['phone_index']).int(),samples=len(x),sample_rate=codec.sample_rate,
+                hop=codec.hop,codec_sha256=codec.fingerprint,source_sha256=row['source_sha256'],
+                annotation_sha256=annotation_hash(row),clean_prefix_audit=audit)
+            atomic_save(c,path)
+        records.append(dict(id=row['id'],frames=c['codes'].shape[-1]))
+        if row['id'] in e.panels['valid']:
+            x=load_audio(row['audio'],codec.sample_rate)
+            y=codec.decode(c['codes'].to(device).long(),c['samples'])[0,0].cpu().numpy()
+            reconstruction.append(dict(id=row['id'],language=row['language'],singer=row['singer'],
+                song_group=row['song_group'],arms={'codec':audio_metrics(x,y,codec.sample_rate)},
+                clean_prefix_audit=c.get('clean_prefix_audit')))
     records=d.gather(records)
+    reconstruction=d.gather(reconstruction)
     if len(records)!=len(e.rows) or {r['id'] for r in records}!=set(e.by_id):raise ValueError('cache coverage mismatch')
-    if d.primary:write_json(e.root/'cache-complete.json',dict(protocol_sha256=e.hash,n=len(records),
-        total_frames=sum(r['frames'] for r in records),max_frames=max(r['frames'] for r in records),
-        latent_storage='none; exact FP32 target latent recomputed for targets/evaluation'))
+    if {r['id'] for r in reconstruction}!=set(e.panels['valid']):raise ValueError('reconstruction panel mismatch')
+    if d.primary:
+        report=summary(reconstruction);report['protocol_sha256']=e.hash
+        write_json(e.root/'codec-reconstruction.json',report)
+        write_json(e.root/'cache-complete.json',dict(protocol_sha256=e.hash,n=len(records),
+            total_frames=sum(r['frames'] for r in records),max_frames=max(r['frames'] for r in records),
+            latent_storage='none; exact FP32 target latent recomputed for targets/evaluation'))
 
 
 def targets_stage(e,d,device):
@@ -322,6 +335,9 @@ def evaluate_stage(e,d,device,arm,split,unlock_test):
 
 def readiness(e,d,device):
     e.require_cache();checks=[]
+    codec_report=json.loads((e.root/'codec-reconstruction.json').read_text())
+    if codec_report['protocol_sha256']!=e.hash or {r['id'] for r in codec_report['samples']}!=set(e.panels['valid']):
+        raise ValueError('codec reconstruction report mismatch')
     runtime=json.loads((e.root/'runtime-verification.json').read_text())
     if (not runtime['passed'] or runtime['config_sha256']!=fingerprint(e.config) or
         runtime['source_manifest_sha256']!=e.protocol['preprocess_config']['source_sha256'] or
@@ -336,6 +352,7 @@ def readiness(e,d,device):
     if len(checks)!=len(e.rows):raise ValueError('readiness coverage mismatch')
     if d.primary:
         report=dict(protocol_sha256=e.hash,n=len(checks),data_cache_verified=True,
+                    codec_reconstruction=codec_report['language_macro']['codec'],
                     training_started=any((e.root/arm/'last.pt').exists() for arm in ('common','baseline','exposure','rrq')),
                     gpu_world=d.world,required_world=e.config['world_size'],ready_for_common=d.world==e.config['world_size'],
                     branches_require='completed common warmup and frozen target bank',test_locked=True)
