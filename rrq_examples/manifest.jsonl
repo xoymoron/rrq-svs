@@ -1,1 +1,0 @@
-{"id":"YOUR_D_ID","singer":"singer_01","audio":"YOUR_PHRASE.wav","prediction":"YOUR_D_ID.npz","origin":"model_rollout","conditioning":"annotation_conditioned","alignment":"same_50hz_grid","gain":1.0}
