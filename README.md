@@ -56,18 +56,25 @@ duration or language cap at acquisition. Chinese minimization is a future
 training-sampling policy, not deletion from the source collection.
 
 ```bash
-~/SVS/.venv-toksing/bin/python -m rrq.toksing_acquire --root ~/SVS/data/gtsinger --output ~/SVS/data/toksing/gtsinger-full.jsonl --workers 8 --wandb
+~/SVS/.venv-toksing/bin/python -m rrq.toksing_acquire --root ~/SVS/data/gtsinger --output ~/SVS/data/toksing/gtsinger-full.jsonl --workers 8
 ```
 
 The pinned source tree, source sizes and available official LFS SHA256 hashes
-are checked. Existing verified raw files are reused. tqdm and W&B show verified
-files/bytes and failures; source-inventory.json and download-status.json are
-local records. Raw acquisition never depends on training annotation eligibility.
+are checked. Existing verified raw files are reused. Download status is local
+only; W&B and visible tmux/epoch tqdm are reserved for training. The acquisition
+process runs detached with a log and PID file. source-inventory.json and
+download-status.json retain local counts and failures. Raw acquisition never
+depends on training annotation eligibility.
 The metadata manifest is an inventory, not a finalized training split.
 Title groups, translation aliases and cross-corpus song identity still need audit.
 
-AIHub dataset473 (next-tone guide vocals) acquisition covers all four accessible
-archives TL1/TS1/VL1/VS1 (file keys34217-34220). The portal reports92 singers and
+Current training corpus: GTSinger singing only. At the user's request, AIHub
+audio acquisition was stopped before completion. Labels are available, but no
+complete AIHub audio corpus is claimed or included in training. The optional
+AIHub473 adapter remains available for future use.
+
+AIHub dataset473 (next-tone guide vocals) has four accessible archives
+TL1/TS1/VL1/VS1 (file keys34217-34220). The portal reports92 singers and
 157.39h; the actual accessible labels contain3609 recordings and141.87h of
 voice_duration. Do not substitute the advertised number for the measured one.
 Note timestamps are NOT phoneme alignments. Breath flags override placeholder
