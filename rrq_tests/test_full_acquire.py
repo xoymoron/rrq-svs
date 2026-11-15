@@ -28,3 +28,14 @@ def test_archive_progress_does_not_double_count_merging_parts(tmp_path):
     assert status['received_bytes'] == 8
     assert status['archives_present'] == 1
     assert set(archives) == {'TS1.zip'}
+
+
+def test_archive_progress_counts_tar_stream_without_double_counting(tmp_path):
+    from rrq.acquisition_watch import archive_progress
+    labels = tmp_path / 'labels'; labels.mkdir()
+    audio = tmp_path / 'audio'; audio.mkdir()
+    (labels / 'TL1.zip').write_bytes(b'12')
+    (audio / 'download.tar').write_bytes(b'12345678')
+    (audio / 'TS1.zip.part0').write_bytes(b'1234')
+    status, _ = archive_progress([labels, audio])
+    assert status['received_bytes'] == 10

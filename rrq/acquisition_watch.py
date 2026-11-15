@@ -22,20 +22,23 @@ def live_size(path):
 def archive_progress(roots):
     archives = {}
     received = 0
-    for name in NAMES:
-        candidates, sizes = [], []
-        for root in roots:
-            root = Path(root)
-            candidates.extend(root.rglob(name))
+    for root in roots:
+        root = Path(root)
+        extracted_bytes = 0
+        for name in NAMES:
+            candidates = list(root.rglob(name))
             parts = list(root.rglob(name + '.part*'))
-            sizes.append(sum(live_size(p) for p in parts))
-        for path in candidates:
-            if path.is_file():
-                sizes.append(live_size(path))
-                if name in archives and path.resolve() != archives[name].resolve():
-                    raise ValueError(f'duplicate final archive: {name}')
-                archives[name] = path
-        received += max(sizes, default=0)
+            sizes = [sum(live_size(p) for p in parts)]
+            for path in candidates:
+                if path.is_file():
+                    sizes.append(live_size(path))
+                    if name in archives and path.resolve() != archives[name].resolve():
+                        raise ValueError(f'duplicate final archive: {name}')
+                    archives[name] = path
+            extracted_bytes += max(sizes)
+        # Official shell first writes a TAR, then extracts parts and merges ZIPs.
+        # During extraction all three representations can coexist.
+        received += max(extracted_bytes, live_size(root / 'download.tar'))
     return dict(received_bytes=received, archives_present=len(archives), archives_expected=4), archives
 
 
