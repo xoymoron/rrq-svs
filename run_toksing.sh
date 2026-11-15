@@ -13,7 +13,9 @@ if [[ ! -f "$CODEC" ]]; then
   "$PYTHON" -c 'import dac, shutil, sys; shutil.copy2(dac.utils.download(model_type="44khz"), sys.argv[1])' "$CODEC"
 fi
 MANIFEST="$SVS_ROOT/data/toksing/gtsinger-pilot.jsonl"
-"$PYTHON" -m rrq.toksing_acquire --root "$SVS_ROOT/data/gtsinger-pilot" --output "$MANIFEST" --existing-only
+if [[ ! -f "$MANIFEST" ]]; then
+  "$PYTHON" -m rrq.toksing_acquire --root "$SVS_ROOT/data/gtsinger-pilot" --output "$MANIFEST" --existing-only
+fi
 ARGS=(--manifest "$MANIFEST" --output artifacts/toksing-dac-pilot --codec "$CODEC")
 for stage in cache reconstruction train oracle; do
   printf '%s stage=%s\n' "$(date -Is)" "$stage"

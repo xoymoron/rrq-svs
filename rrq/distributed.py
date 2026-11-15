@@ -45,7 +45,7 @@ class Distributed:
 
     def barrier(self):
         if self.world > 1:
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank] if torch.cuda.is_available() else None)
 
     def gather(self, values):
         if self.world == 1:
