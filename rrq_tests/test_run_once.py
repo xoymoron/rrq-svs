@@ -42,3 +42,23 @@ def test_resume_rejects_protocol_change_and_untracked_checkpoint(tmp_path):
     run_pipeline(root,lambda s:None)
     write_json(root/'protocol.json',{'sha256':'changed'})
     with pytest.raises(ValueError,match='protocol'):run_pipeline(root,lambda s:None,resume=True)
+
+
+def test_final_comparison_rejects_mismatched_budget_or_schedule(tmp_path):
+    import torch
+    from rrq.io import sha256
+    from rrq.run_once import verify_matched
+    (tmp_path/'common').mkdir();(tmp_path/'common/best.pt').write_bytes(b'common')
+    protocol=dict(sha256='p',config={'branch_epochs':2})
+    write_json(tmp_path/'protocol.json',protocol)
+    for arm in ('baseline','exposure','rrq'):
+        folder=tmp_path/arm;folder.mkdir()
+        torch.save(dict(protocol_sha256='p',initial_checkpoint_sha256=sha256(tmp_path/'common/best.pt'),
+                        arm=arm,epoch=2,step=20),folder/'last.pt')
+        for epoch in (1,2):
+            write_json(folder/f'epoch-{epoch:03d}.json',dict(protocol_sha256='p',step=epoch*10,
+                draws=80,schedule_sha256='schedule',shared_predicted_mixture_sha256='mixture'))
+    verify_matched(tmp_path)
+    r=json.loads((tmp_path/'rrq/epoch-002.json').read_text());r['schedule_sha256']='different'
+    write_json(tmp_path/'rrq/epoch-002.json',r)
+    with pytest.raises(ValueError,match='matched'):verify_matched(tmp_path)

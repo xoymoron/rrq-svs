@@ -69,6 +69,30 @@ def publish(root):
     write_json(root/'comparison-wandb.json',dict(id=run.id,url=run.url));run.finish()
 
 
+def verify_matched(root):
+    """Audit executed budgets/schedules before unlocking any test metrics."""
+    import torch
+    protocol=json.loads((root/'protocol.json').read_text());epochs=protocol['config']['branch_epochs']
+    common=sha256(root/'common/best.pt');steps=[];sequences=[]
+    keys=('step','draws','schedule_sha256','shared_predicted_mixture_sha256')
+    for arm in ('baseline','exposure','rrq'):
+        state=torch.load(root/arm/'last.pt',map_location='cpu',weights_only=True,mmap=True)
+        if (state['protocol_sha256']!=protocol['sha256'] or state['arm']!=arm or
+            state['initial_checkpoint_sha256']!=common or state['epoch']!=epochs):
+            raise ValueError('unmatched initialization/protocol/final epoch')
+        steps.append(state['step']);del state
+        records=[]
+        for epoch in range(1,epochs+1):
+            report=json.loads((root/arm/f'epoch-{epoch:03d}.json').read_text())
+            if report['protocol_sha256']!=protocol['sha256']:raise ValueError('unmatched epoch protocol')
+            records.append({k:report[k] for k in keys})
+        sequences.append(records)
+    if len(set(steps))!=1 or any(s!=sequences[0] for s in sequences[1:]):
+        raise ValueError('unmatched optimizer budget, sample schedule or mixture')
+    write_json(root/'matched-training-audit.json',dict(passed=True,protocol_sha256=protocol['sha256'],
+        common_sha256=common,branch_epochs=epochs,updates_per_arm=steps[0],epoch_schedules=sequences[0]))
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',default='artifacts/gtsinger-rrq-v2');p.add_argument('--resume',action='store_true')
@@ -83,6 +107,7 @@ def main():
         os.environ['WANDB_MODE']='online'
         def execute(stage):
             if stage=='publish':return publish(root)
+            if stage=='final-test':verify_matched(root)
             command=['bash','run_matched.sh',stage]
             if stage=='final-test':command.append('--unlock-test')
             subprocess.run(command,env=env,check=True)
