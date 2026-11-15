@@ -39,6 +39,38 @@ def evaluation_contract(cfg):
     return identity
 
 
+def evaluation_ids(data, panels, cfg, languages, split='valid'):
+    if split not in ('valid', 'test'):
+        raise ValueError('evaluation split must be valid or test')
+    if split == 'test':
+        # Full untouched test, not a favorable audition subset.
+        ids = sorted(r['id'] for r in data.rows.values() if r['split'] == 'test')
+    elif cfg.get('validation_per_language', 2) == 2 and 'valid' in panels:
+        ids = panels['valid']
+    else:
+        from .gtsinger_prepare import select_panel
+        ids = select_panel(list(data.rows.values()), 'valid', cfg.get('validation_per_language', 2))
+    return [i for i in ids if data.rows[i]['language'] in languages]
+
+
+def cohort_summary(examples):
+    result = {}
+    for cohort in sorted({r.get('singer_cohort', 'seen') for r in examples}):
+        rows = [r for r in examples if r.get('singer_cohort', 'seen') == cohort]
+        def aggregate(items):
+            return mean_maps([{k:v for k,v in r.items() if isinstance(v,(int,float)) or v is None} for r in items])
+        per_language = {lang:aggregate([r for r in rows if r['language']==lang]) for lang in sorted({r['language'] for r in rows})}
+        per_singer = {s:aggregate([r for r in rows if r['singer']==s]) for s in sorted({r['singer'] for r in rows})}
+        values = dict(count=len(rows), per_language=per_language, per_singer=per_singer,
+                      macro=mean_maps(list(per_language.values())), singer_macro=mean_maps(list(per_singer.values())))
+        if rows and all('pronunciation' in r for r in rows):
+            from .pronunciation import aggregate as speech
+            values['pronunciation'] = speech([r['pronunciation'] for r in rows])
+            values['per_language_pronunciation'] = {lang:speech([r['pronunciation'] for r in rows if r['language']==lang]) for lang in per_language}
+        result[cohort] = values
+    return result
+
+
 def condition_variant(sequence,tokens,kind):
     if kind not in ('phone','midi'):raise ValueError('unknown condition perturbation')
     changed=sequence.clone()
@@ -132,23 +164,20 @@ def synthesize(cfg,data,row_id,model,runtime):
 
 
 @torch.inference_mode()
-def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
+def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None,split='valid'):
     import torchaudio
     from .uniaudio_data import _verify_artifact, score_conditions
     from .uniaudio_train import protocol
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     panels=json.loads(_verify_artifact(Path(cfg['prepared_path']),data.recipe,'panels.json').read_text())
-    if cfg.get('validation_per_language',2)!=2:
-        from .gtsinger_prepare import select_panel
-        panels['valid']=select_panel(list(data.rows.values()),'valid',cfg['validation_per_language'])
     languages=sorted(languages or {r['language'] for r in data.rows.values()})
-    selected=[i for i in panels['valid'] if data.rows[i]['language'] in languages]
+    selected=evaluation_ids(data,panels,cfg,languages,split)
     if not selected:raise ValueError('empty validation panel')
     was_training=model.training;model.eval()
     codec=ua.load_codec(cfg['upstream_path'],cfg['codec_path'],runtime.device)
     examples=[]
     try:
-        for row_id in tqdm(selected[runtime.rank::runtime.world],desc=f'validation GPU{runtime.rank}'):
+        for row_id in tqdm(selected[runtime.rank::runtime.world],desc=f'{split} GPU{runtime.rank}'):
             row=data.rows[row_id];folder=out/safe_id(row_id);folder.mkdir(exist_ok=True)
             start=time.monotonic()
             predicted=synthesize(cfg,data,row_id,model,runtime)
@@ -185,7 +214,7 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
             for name,wave in waves.items():
                 path=folder/f'{name}.wav';sf.write(path,wave,16000,subtype='FLOAT');paths[name]=str(path.resolve())
             torch.save(dict(predicted=predicted.cpu(),clean=clean.cpu()),folder/'tokens.pt')
-            example=dict(id=row_id,language=row['language'],singer=row['singer'],**stats,
+            example=dict(id=row_id,language=row['language'],singer=row['singer'],singer_cohort=row.get('singer_cohort','seen'),**stats,
                          audio=paths,codec=measure(raw,reconstructed),oracle=oracle,seconds=time.monotonic()-start)
             if cfg.get('pronunciation',{}).get('enabled'):
                 from . import pronunciation
@@ -200,11 +229,13 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
     for row in examples:
         grouped[row['language']].append({k:v for k,v in row.items() if isinstance(v,(int,float)) or v is None})
     per_language={language:mean_maps(values) for language,values in grouped.items()}
-    report=dict(protocol_sha256=protocol(data),checkpoint_sha256=sha256(checkpoint_path),languages=languages,
+    report=dict(protocol_sha256=protocol(data),checkpoint_sha256=sha256(checkpoint_path),languages=languages,split=split,
                 evaluation_contract=evaluation_contract(cfg),panel_ids=selected,
                 examples=sorted(examples,key=lambda x:x['id']),per_language=per_language,macro=mean_maps(list(per_language.values())),
+                by_cohort=cohort_summary(examples),
                 thresholds=cfg['gate'],operational_gate_passed=operational_gate(per_language,cfg['gate'],languages),
-                scope=f"Fixed validation panel, {cfg.get('validation_per_language',2)} utterances per language; no test data.",
+                scope=(f"Fixed seen-singer validation panel, {cfg.get('validation_per_language',2)} utterances per language; no test data."
+                       if split=='valid' else 'Full test; seen/unseen cohorts reported separately. Not for checkpoint selection.'),
                 quality_limit='Pitch/voicing and condition-CE diagnostic only; no lyric intelligibility or MOS claim.',
                 oracle_limit='Target-latent suffix oracle after free generation; not deployable inference or learnability proof.',
                 comparison='Same clock; zero-pad missing tails; no DTW, pitch shift, rescaling or time stretch.',
@@ -224,6 +255,9 @@ def evaluate_loaded(cfg,data,model,checkpoint_path,out,runtime,languages=None):
             report['per_singer'][singer]=dict(acoustic=acoustic,pronunciation=speech,gate_passed=passed)
         report['operational_gate_passed']=report['operational_gate_passed'] and report['pronunciation_gate_passed'] and all(r['gate_passed'] for r in report['per_singer'].values())
         report['quality_limit']='ASR lyric intelligibility proxy with raw/codec controls; not human pronunciation, identity or MOS validation.'
+    if split == 'test':
+        report['diagnostic_thresholds_passed'] = report['operational_gate_passed']
+        report['operational_gate_passed'] = False  # Test results cannot unlock RRQ training.
     if runtime.rank==0:write_json(out/'evaluation.json',report)
     return report
 
@@ -235,11 +269,14 @@ def main():
     parser.add_argument('--config',required=True);parser.add_argument('--workspace',required=True)
     parser.add_argument('--output',required=True);parser.add_argument('--checkpoint')
     parser.add_argument('--languages',nargs='+')
+    parser.add_argument('--split',choices=('valid','test'),default='valid')
     args=parser.parse_args();cfg=load_recipe(args.config,args.workspace)
     data=PreparedData(cfg['prepared_path'],cfg['cache_path']);runtime=Runtime()
     try:
         model,_=load_model(cfg,data,runtime.device,args.checkpoint)
-        evaluate_loaded(cfg,data,model,args.checkpoint or cfg['checkpoint_path'],args.output,runtime,args.languages)
+        if args.split=='test' and not args.checkpoint:
+            raise ValueError('test evaluation requires an explicitly selected checkpoint')
+        evaluate_loaded(cfg,data,model,args.checkpoint or cfg['checkpoint_path'],args.output,runtime,args.languages,args.split)
     finally:runtime.close()
 
 

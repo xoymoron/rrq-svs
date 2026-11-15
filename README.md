@@ -128,9 +128,9 @@ compare cached decisions to original full-forward logits and input ordering
 to the original collator. The optional depth-forward helper preserves global
 history and clean-forward equivalence; learned RRQ effectiveness is untested.
 
-Old runners and environments are inactive. Broad deletion waits until the
-replacement baseline passes synthesis validation; raw corpus and historical
-evidence are preserved.
+Old runners are historical and their environments may have been removed.
+The active environment is `.venv-uniaudio`; raw corpus, native cache, final
+Chinese checkpoint and diagnostic evidence are retained.
 
 ## Chinese baseline adaptation
 
@@ -158,3 +158,54 @@ resumption. `live.json` reports current progress. W&B includes per-example
 audition, expected lyrics, all three transcripts, CER, F0/voicing and clean CE.
 Both singers must pass the acoustic and calibrated ASR gates. This launcher
 never automatically starts RRQ.
+
+## Multilingual scratch split: seen and unseen singers
+
+The next run uses `config/uniaudio-gtsinger-scratch.json`, **random initialization**
+of the official small model, and a new immutable prepared directory. It does
+not continue the Chinese fine-tune. Preparation does not start training.
+
+English `EN-Alto-2`, Italian `IT-Bass-2`, and Korean `KO-Soprano-1` are held out
+from generator training. Each of these languages retains two training singers;
+all nine languages and 17 singers remain represented in train. Other languages
+have only one or two singers and are evaluated as seen singers. In particular,
+Russian has only one singer. This is a three-singer generalization test, not
+evidence of zero-shot performance in all nine languages or unseen languages.
+
+The original global song-family train/valid/test assignments stay fixed for
+seen singers. Held-out singers retain their original test songs as unseen
+test. One fixed phrase of at least three seconds, from an original training
+song, supplies enrollment audio for each unseen singer. The first 150 codec
+frames are used. These three reference phrases contribute no training loss.
+Their song families are disjoint from every validation/test target family.
+Other non-test phrases of held-out singers are marked `excluded`, not deleted;
+their raw audio and codec caches stay available. Reference enrollment songs may
+occur in training **by other singers**; the enrollment identity never does.
+
+Validation contains seen singers only and is used for checkpoint selection.
+An explicit `--split test --checkpoint ...` evaluates the complete test split
+and writes separate `by_cohort.seen` / `by_cohort.unseen` metrics, language and
+singer means. Never use test or its target-assisted oracle to tune the model.
+Test reports cannot qualify a common model for RRQ branch training. All three
+arms must use this identical prepared recipe and prompt mapping. Codec
+pretraining identities are unknown; "unseen" refers to generator training.
+
+```bash
+# Read/verify existing native caches; writes manifests only, no re-encoding.
+../.venv-uniaudio/bin/python -m rrq.uniaudio_resplit \
+  --config config/uniaudio-gtsinger-scratch.json --workspace .. \
+  --source-prepared ../data/uniaudio/gtsinger-prepared-v1
+
+# Later, after checkpoint selection and explicit authorization to evaluate:
+UNIAUDIO_RECIPE=config/uniaudio-gtsinger-scratch.json \
+  bash scripts/run_uniaudio_stage.sh evaluate artifacts/final-test \
+  --split test --checkpoint artifacts/common/last.pt
+```
+
+The native acoustic cache key depends only on waveform checksum, codec and
+encoding contract. Resplitting verifies every existing record without loading
+the codec or changing cache bytes/mtime. Vocabulary is rebuilt from the new
+train partition only. Old preflight/readiness receipts belong to their old
+protocol and do not certify this split. The multilingual ASR proxy remains
+uncalibrated for some languages; do not interpret a raw-audio ASR failure as a
+generator failure or silently relax the acceptance thresholds.

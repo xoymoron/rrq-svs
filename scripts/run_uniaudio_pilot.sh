@@ -3,8 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PYTHON="${UNIAUDIO_PYTHON:-../.venv-uniaudio/bin/python}"
 OUTPUT="${1:-artifacts/uniaudio-native-20261116}"
-MODEL_DIR="${UNIAUDIO_MODEL_DIR:-../data/uniaudio/checkpoints/uniaudio_v1}"
-MODEL_FILE="${UNIAUDIO_MODEL_FILE:-ep5-iter340000.checkpoint}"
+MODEL_DIR="${UNIAUDIO_MODEL_DIR:-../data/uniaudio/checkpoints-20240722/uniaudio_v1}"
+MODEL_FILE="${UNIAUDIO_MODEL_FILE:-v1.checkpoint}"
 mkdir -p "$OUTPUT"
 "$PYTHON" -m rrq.uniaudio_pilot prepare --manifest ../data/toksing/gtsinger-full.jsonl --output "$OUTPUT"
 args=(--upstream ../references/UniAudio

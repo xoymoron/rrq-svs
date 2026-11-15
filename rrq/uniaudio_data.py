@@ -94,10 +94,19 @@ def read_rows(path):
     groups = {}
     for row in rows:
         split, song = row['split'], row['song_group']
-        if split not in SPLITS or not song:
+        if split not in (*SPLITS, 'reference', 'excluded') or not song:
             raise ValueError('invalid manifest split or song family')
-        if groups.setdefault(song, split) != split:
+        if split in SPLITS and groups.setdefault(song, split) != split:
             raise ValueError('song leakage across splits')
+    train_singers = {r['singer'] for r in rows if r['split'] == 'train'}
+    evaluation_songs = {r['song_group'] for r in rows if r['split'] in ('valid', 'test')}
+    for row in rows:
+        if 'singer_cohort' in row:
+            expected = 'seen' if row['singer'] in train_singers else 'unseen'
+            if row['singer_cohort'] != expected or (row['split'] == 'valid' and expected != 'seen'):
+                raise ValueError('invalid singer cohort or validation identity leakage')
+        if row['split'] == 'reference' and (row['singer'] in train_singers or row['song_group'] in evaluation_songs):
+            raise ValueError('reference singer or song leaks into training/evaluation')
     return rows
 
 
@@ -133,23 +142,32 @@ def phone_id(row, phone, vocab):
     return vocab['phone_ids'].get(_phone_key(row['language'], phone), vocab['unknown_id'])
 
 
+def prompt_allowed(row, ref):
+    unseen = row.get('singer_cohort') == 'unseen'
+    return (row['split'] in SPLITS and (not unseen or row['split'] == 'test')
+            and ref['split'] == ('reference' if unseen else 'train')
+            and ref['singer'] == row['singer'] and ref['song_group'] != row['song_group'])
+
+
 def assign_prompts(rows, seed):
-    train = defaultdict(list)
+    pools = defaultdict(list)
     for row in sorted(rows, key=lambda row: row['id']):
-        if row['split'] == 'train':
-            train[row['singer']].append((row['id'], row['song_group']))
+        if row['split'] in ('train', 'reference'):
+            pools[row['singer']].append(row)
     prompts = {}
     for row in rows:
-        candidates = train[row['singer']]
+        if row['split'] not in SPLITS:
+            continue
+        candidates = pools[row['singer']]
         if candidates:
             start = int(_digest([seed, row['id']])[:16], 16) % len(candidates)
             for offset in range(len(candidates)):
-                prompt, song = candidates[(start + offset) % len(candidates)]
-                if song != row['song_group']:
-                    prompts[row['id']] = prompt
+                ref = candidates[(start + offset) % len(candidates)]
+                if prompt_allowed(row, ref):
+                    prompts[row['id']] = ref['id']
                     break
         if row['id'] not in prompts:
-            raise ValueError(f"no other train song prompt for {row['id']} ({row['singer']})")
+            raise ValueError(f"no admissible other-song prompt for {row['id']} ({row['singer']})")
     return prompts
 
 
@@ -367,6 +385,8 @@ def _identity(cfg):
 
 
 def prepare(cfg):
+    if cfg.get('heldout_singers'):
+        raise ValueError('singer holdout requires rrq.uniaudio_resplit from a verified original preparation')
     out = Path(cfg['prepared_path'])
     identity = _identity(cfg)
     lock = out / 'recipe.json'
@@ -459,8 +479,8 @@ class PreparedData:
 
     def _prefix(self, row, phones, midi, device, ending):
         ref = self.rows[self.prompts[row['id']]]
-        if not (ref['split'] == 'train' and ref['singer'] == row['singer'] and ref['song_group'] != row['song_group']):
-            raise ValueError(f"inadmissible training prompt for {row['id']}")
+        if not prompt_allowed(row, ref):
+            raise ValueError(f"inadmissible singing prompt for {row['id']}")
         limit = self.recipe['config']['prompt_frames']
         if 3 * len(midi) + min(limit, ref['frames']) + 9 + ending >= self.recipe['block_size']:
             raise ValueError(f"UniAudio context overflow for {row['id']}")

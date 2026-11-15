@@ -122,8 +122,10 @@ def native_state(model):
 
 def load_model(cfg,data,device,checkpoint=None):
     from .uniaudio_data import _identity
+    from .uniaudio_resplit import validate_holdout
     from .uniaudio_initialization import random_generator,validate_initialization
     import yaml
+    validate_holdout(cfg,data)
     actual=_identity(cfg)
     if any(data.recipe.get(key)!=value for key,value in actual.items() if key!='config'):
         raise ValueError('runtime source or checkpoint differs from prepared recipe')
@@ -443,6 +445,8 @@ def log_evaluation(run,metrics,epoch,step):
     scalars.update({'valid/'+k:v for k,v in metrics['macro'].items()})
     scalars.update({'valid/asr_'+k:v for k,v in metrics.get('pronunciation',{}).items()})
     scalars['valid/operational_gate_passed']=int(metrics['operational_gate_passed'])
+    for cohort, values in metrics.get('by_cohort',{}).items():
+        scalars.update({f'valid/{cohort}/{k}':v for k,v in values['macro'].items()})
     for language,values in metrics['per_language'].items():
         scalars.update({f'valid/{language}/{k}':v for k,v in values.items()})
     for language,values in metrics.get('per_language_pronunciation',{}).items():
@@ -450,11 +454,11 @@ def log_evaluation(run,metrics,epoch,step):
     for singer,values in metrics.get('per_singer',{}).items():
         scalars.update({f'valid/singer/{singer}/{k}':v for k,v in values['acoustic'].items()})
         scalars.update({f'valid/singer/{singer}/asr_{k}':v for k,v in values['pronunciation'].items()})
-    table=wandb.Table(columns=['id','language','reference','codec','generated','within50','voicing_error',
+    table=wandb.Table(columns=['id','language','singer','cohort','reference','codec','generated','within50','voicing_error',
                                'lyrics','reference_asr','codec_asr','generated_asr','generated_cer'])
     for row in metrics['examples']:
         speech=row.get('pronunciation');texts=[speech['transcripts'][arm]['raw'] for arm in ('reference','codec','generated')] if speech else [None]*3
-        table.add_data(row['id'],row['language'],*[wandb.Audio(row['audio'][arm],sample_rate=16000)
+        table.add_data(row['id'],row['language'],row['singer'],row.get('singer_cohort','seen'),*[wandb.Audio(row['audio'][arm],sample_rate=16000)
             for arm in ('reference','codec','generated')],row['within_50_cents'],row['voicing_error'],
             speech['lyrics'] if speech else None,*texts,speech['metrics']['generated_cer'] if speech else None)
     scalars['audition']=table;run.log(scalars)
