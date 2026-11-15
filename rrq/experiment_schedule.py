@@ -1,5 +1,6 @@
 """Resumable two-GPU experiment pipeline. Run inside tmux; all output is mirrored."""
 import argparse
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
@@ -31,7 +32,10 @@ def batches(root,jobs):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__); p.add_argument('--root',type=Path,required=True)
+    p.add_argument('--wandb-project'); p.add_argument('--wandb-entity')
     p.add_argument('--asr',type=Path,default=Path('artifacts/whisper-turbo')); args=p.parse_args()
+    if args.wandb_project: os.environ['WANDB_PROJECT']=args.wandb_project
+    if args.wandb_entity: os.environ['WANDB_ENTITY']=args.wandb_entity
     root=args.root; started=time.time()
     def stage(name):
         atomic_json(root/'pipeline-status.json',dict(stage=name,state='running',elapsed_seconds=time.time()-started))
@@ -60,6 +64,8 @@ def main():
         stage('paired summary')
         from .experiment_summary import summarize
         summarize(root)
+        from .tracking import publish_summary
+        publish_summary(root)
         atomic_json(root/'pipeline-status.json',dict(stage='complete',state='complete',elapsed_seconds=time.time()-started))
         print('MATCHED_EXPERIMENT_COMPLETE',str(root),flush=True)
     except BaseException as exc:

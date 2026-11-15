@@ -515,3 +515,39 @@ common multilingual checkpoint is imported with identical parameter tensors and
 explicit parent hashes via `revise-sampling --from-root artifacts/matched-v1`;
 all affected prediction caches and branch training are rebuilt. This correction
 does not itself establish that multilingual pronunciation is adequate.
+
+### Online experiment tracking
+
+Run the full pipeline with native W&B tracking from the first warmup step:
+
+```bash
+python -m rrq.experiment_schedule --root artifacts/matched-v3-wandb \
+  --wandb-project rrq-svs --wandb-entity YOUR_ENTITY
+```
+
+Authenticate with `wandb login` outside the repository. Never put keys in CLI flags,
+source, protocol JSON, or Git. Logging is opt-in via these flags (or WANDB_PROJECT /
+WANDB_ENTITY); enabled tracking requires an online run and fails visibly on init errors.
+Each experiment root has its own group; warmup and all nine arm/seed combinations
+have separate runs. Loss scope is logged: warmup predicts all codebooks, branches
+predict only the suffix, so those CE curves are not interchangeable.
+
+Training records step loss, running CE, pre-clip gradient norm, learning rates,
+mixture decisions, elapsed time, peak CUDA allocation, plus W&B system monitoring.
+Validation records language-macro and per-language CE; initial/selected warmup also
+records the phone-reversal CE gap. Evaluation records all phrase metrics/ASR text,
+ASR length-cap flags, duration/RMS/clipping/peak and per-codebook diversity/entropy.
+The `paired_audition` table uses the same two SHA256-selected IDs per language for
+reference, codec reconstruction and every generated variant; it is not quality-ranked.
+Audio is uploaded after the corresponding full evaluation, not on every train step.
+W&B playback may apply client playback scaling; FLOAT WAV and numeric amplitude
+metrics remain the quantitative record. No automatic listening judgments or MOS.
+Final comparison CSV/JSON and the locked protocol are uploaded as an artifact.
+Local JSON/WAV files remain canonical. Model weights and the full raw corpus are not
+uploaded. Resuming uses stable run IDs; if an interrupted partial epoch is rerun,
+training global_step values can repeat (local final epoch JSON is canonical).
+
+`matched-v3-wandb` starts fresh from official pretrained weights; earlier v1/v2
+adapter and optimizer states are not reused. Cached dataset/codec preprocessing is
+reused unchanged. Logging alone does not repair the poor multilingual quality found
+in v2; that remains a limitation of the experiment.

@@ -16,6 +16,7 @@ from .io import sha256
 from .multilingual import read_rows
 from .pipeline import prepare_audio
 from .upstream import load_codec, load_vocoder
+from .tracking import token_metrics, publish_evaluation
 
 ASR_SHA256='542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1'
 
@@ -64,6 +65,8 @@ def waveform_metrics(job):
         f0_rmse_cents=float(np.sqrt(np.mean(cents**2))) if joint.any() else None,
         voicing_error=float(np.mean(av!=bv)),joint_voiced_fraction=float(np.mean(joint)),
         reference_voiced_fraction=float(np.mean(av)),generated_voiced_fraction=float(np.mean(bv)),
+        duration_seconds=float(len(wave)/sr), rms=float(np.sqrt(np.mean(wave**2))),
+        clipping_fraction=float(np.mean(np.abs(wave)>=1.)),
         peak_amplitude=float(np.max(np.abs(wave))))
 
 
@@ -121,6 +124,7 @@ def evaluate(args):
             metric.update(character_error(lyrics(row),hypothesis))
             if label not in ('reference','codec'):
                 with np.load(path.with_suffix('.npz'),allow_pickle=False) as f: codes=f['codes'].copy()
+                metric.update(token_metrics(codes))
                 with np.load(args.root/'targets'/(row['id']+'.npz'),allow_pickle=False) as f:
                     latent=f['latent'].copy(); coarse=f['predicted'][0].copy()
                 if any(label.startswith(arm+'-') for arm in ('baseline','exposure','rrq')) and not np.array_equal(codes[0],coarse):
@@ -136,6 +140,7 @@ def evaluate(args):
             asr_language='provided corpus language',asr_prompt='none',character_normalization='NFKC casefold alphanumeric'))
         result.extend(collected)
     print('EVALUATION_COMPLETE',args.split,flush=True)
+    publish_evaluation(args.root,args.split,labels)
 
 
 def main():

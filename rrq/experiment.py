@@ -205,6 +205,14 @@ class Experiment:
 
 
 def train(args):
+    from .tracking import Tracker
+    label = 'warmup' if args.stage == 'warmup' else f'{args.arm}-{args.seed}'
+    with Tracker(args.root, label) as tracker:
+        return tracked_train(args, tracker)
+
+
+def tracked_train(args, tracker):
+    from .tracking import validation_metrics
     ex=Experiment(args.root,args.device); cfg=ex.cfg
     warm=args.stage=='warmup'; seed=17 if warm else args.seed
     torch.manual_seed(seed)
@@ -230,7 +238,9 @@ def train(args):
         last=ex.load(out/'last.pt'); optimizer.load_state_dict(last['optimizer']); start_epoch=last['epoch']+1; metrics=last['metrics']
         if warm: best=recover_best(out,ex.protocol_hash,last)
     elif warm:
-        atomic_json(out/'initial-validation.json',ex.validate(shuffle=True))
+        initial=ex.validate(shuffle=True)
+        atomic_json(out/'initial-validation.json',initial)
+        tracker.log(validation_metrics(initial, 'initial_validation'))
     epochs=cfg['warmup_epochs'] if warm else cfg['branch_epochs']
     cache={}
     if not warm:
@@ -259,6 +269,13 @@ def train(args):
                 if not torch.equal(original_rows,ex.model.global_model.transformer.wte.weight[:ex.old]): raise RuntimeError('original input embedding rows changed')
                 item=dict(epoch=epoch,step=step,id=row['id'],language=row['language'],loss=float(loss.detach()),grad_norm=float(norm),mixture_draw=replacement)
                 stream.write(json.dumps(item)+'\n'); stream.flush(); losses.append(item['loss']); replacements+=replacement
+                tracker.log({'train/global_step': (epoch-1)*len(schedule)+step, 'train/epoch': epoch,
+                    'train/loss': item['loss'], 'train/grad_norm_before_clip': item['grad_norm'],
+                    'train/mixture_draw': int(replacement), 'train/uses_predicted_prefix': int(not warm and args.arm!='baseline' and replacement),
+                    'train/lr_backbone': cfg['backbone_lr'], 'train/lr_new_embedding': cfg['embedding_lr'] if warm else 0.,
+                    'train/mean_ce_so_far': float(np.mean(losses)),
+                    'train/elapsed_seconds': time.monotonic()-total,
+                    'train/gpu_peak_allocated_gib': torch.cuda.max_memory_allocated(ex.device)/2**30 if str(ex.device).startswith('cuda') else 0.})
                 if step%20==0 or step==len(schedule):
                     status=dict(stage=args.stage,arm=args.arm if not warm else 'common',seed=seed,epoch=epoch,epochs=epochs,
                         step=step,steps=len(schedule),mean_train_ce=float(np.mean(losses)),elapsed_seconds=time.monotonic()-epoch_time)
@@ -267,13 +284,18 @@ def train(args):
         metrics.update(epoch=epoch,train_ce=float(np.mean(losses)),schedule_sha256=hashlib.sha256('\n'.join(r['id'] for r in schedule).encode()).hexdigest(),
                        mixture_draws=replacements,seconds=time.monotonic()-epoch_time)
         atomic_json(out/f'validation-{epoch:02d}.json',metrics)
+        tracker.log(validation_metrics(metrics))
+        tracker.summary({'last_epoch': epoch, 'schedule_sha256': metrics['schedule_sha256']})
         ex.save(out/'last.pt',save_names,epoch,metrics,optimizer)
         if warm and metrics['language_macro_ce']<best:
             best=metrics['language_macro_ce']; ex.save(out/'best.pt',save_names,epoch,metrics)
             atomic_json(out/'best.json',dict(epoch=epoch,value=best))
         print('EPOCH_DONE',json.dumps({k:v for k,v in metrics.items() if k not in ('samples','per_language')}),flush=True)
     if warm:
-        ex.load(out/'best.pt'); atomic_json(out/'selected-validation.json',ex.validate(shuffle=True))
+        ex.load(out/'best.pt'); selected=ex.validate(shuffle=True)
+        atomic_json(out/'selected-validation.json',selected)
+        tracker.log(validation_metrics(selected, 'selected_validation'))
+        tracker.summary({'selected_checkpoint': 'best.pt', 'best_validation_ce': best})
     else: ex.save(out/'final.pt',save_names,epochs,metrics)
     atomic_json(out/'complete.json',dict(stage=args.stage,epochs=epochs,seed=seed,trainable_names=names,protocol_sha256=ex.protocol_hash,
         common_sha256=None if warm else index['common_sha256'],seconds=time.monotonic()-total))
