@@ -45,9 +45,13 @@ def extend_vocabulary(model,size,seed=17):
         for name in ('g_emb','l_emb','lm_head'):
             source=getattr(model,name);width=source.weight.shape[1]
             new=nn.Linear(width,size,bias=False) if name=='lm_head' else nn.Embedding(size,width)
-            nn.init.normal_(new.weight,mean=0.,std=.02)
             new=new.to(device=source.weight.device,dtype=source.weight.dtype)
-            with torch.no_grad():new.weight[:old].copy_(source.weight)
+            with torch.no_grad():
+                new.weight[:old].copy_(source.weight)
+                new.weight[old:].copy_(source.weight.float().mean(0).to(source.weight.dtype))
+            # Mean-head initialization preserves the learned logit offset. By
+            # Jensen, added mass <= (size-old)/old of original mass; random
+            # zero-mean rows can instead dominate a pretrained softmax.
             setattr(model,name,new)
     return model
 
@@ -104,7 +108,7 @@ def protocol(data):
     keys=('manifest_sha256','codec_sha256','codec_config_sha256','encoding_contract',
           'model_config_sha256','vocabulary_sha256','checkpoint_sha256','prompts_sha256',
           'segments_sha256','panels_sha256','implementation_sha256','upstream_commit')
-    return fingerprint({'objective':'official-all-token-ce-depth-only-v1',
+    return fingerprint({'objective':'official-all-token-ce-depth-only-v2-mean-vocab-expansion',
                         'timing':{k:data.recipe['config'][k] for k in ('max_frames','prompt_frames')},
                         **{k:data.recipe[k] for k in keys}})
 
@@ -304,6 +308,8 @@ def train(cfg,data,out,runtime,arm,epochs,languages=None,common=None,bank=None,r
     out.mkdir(parents=True,exist_ok=True)
     if (out/'last.pt').exists() and not resume:raise ValueError('existing run requires explicit resume')
     model,saved=load_model(cfg,data,runtime.device,resume or common)
+    if common and not resume and saved.get('arm')!='common':
+        raise ValueError('matched branches require a common-stage checkpoint')
     common_hash=sha256(common) if common else None
     run_settings=run_contract(cfg,data,arm,languages,common_hash)
     run_settings['bank_sha256']=sha256(Path(bank)/'bank.json') if bank else None

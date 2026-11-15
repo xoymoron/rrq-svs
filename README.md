@@ -38,7 +38,9 @@ The full GTSinger singing inventory is preserved: 9 languages, 28,628 phrases,
 Song families, including explicit translated-title aliases and matching PCM,
 are kept within one split. Three-second prompts come from different training
 songs of the same singer. The native Chinese IDs are preserved. Additional
-language-qualified phoneme rows are initialized from train data only; this is
+language-qualified phoneme rows are added from train data only. New rows use
+the pretrained row mean, preserving its logit calibration; zero-mean random
+head rows otherwise stole probability mass from the released model. This is
 preparation for multilingual adaptation, not evidence that adaptation works.
 
 Input is phonemes, note MIDI, provided performed phoneme duration and an audio

@@ -28,6 +28,23 @@ def test_vocabulary_extension_keeps_every_pretrained_weight_row():
         else:assert torch.equal(value,before[key])
 
 
+def test_extension_preserves_old_logits_and_bounds_added_softmax_mass():
+    import math
+    mod=module();model=original_model().eval()
+    # Pretrained heads can have a logit offset. Zero-mean random new rows must
+    # not steal essentially all mass even though every old row is preserved.
+    with torch.no_grad():
+        model.lm_head.weight.fill_(-3.)
+        model.l_ln.bias.fill_(5.)
+        seq=torch.randint(6,95,(1,24));mask=torch.zeros_like(seq,dtype=torch.bool)
+        old=model(seq,mask)
+        mod.extend_vocabulary(model,103,seed=17)
+        new=model(seq,mask)
+        assert torch.allclose(new[...,:96],old,atol=1e-5)
+        ce=lambda z:torch.nn.functional.cross_entropy(z.transpose(1,2),seq)
+        assert float(ce(new)-ce(old))<=math.log(103/96)+1e-4
+
+
 def test_baseline_objective_equals_official_forward_and_rrq_backpropagates():
     mod=module();model=original_model().eval()
     seq=torch.randint(6,95,(1,24));mask=torch.zeros_like(seq,dtype=torch.bool)
