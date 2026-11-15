@@ -36,6 +36,7 @@ def timed_subset(rows,hours):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--root',required=True)
     p.add_argument('--output',required=True);p.add_argument('--hours-per-singer',type=float,default=1.5)
+    p.add_argument('--workers',type=int,default=12)
     p.add_argument('--existing-only',action='store_true');a=p.parse_args()
     root=Path(a.root);root.mkdir(parents=True,exist_ok=True);rows=[]
     download(BASE+'dataset_license.md',root/'dataset_license.md',100000)
@@ -52,7 +53,8 @@ def main():
     def get(row):
         download(BASE+urllib.parse.quote(row['source_audio'],safe='/'),row['audio'],16*1024**2)
         return row
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    if not 1<=a.workers<=16:raise ValueError('workers must be1..16')
+    with ThreadPoolExecutor(max_workers=a.workers) as pool:
         for i,_ in enumerate(pool.map(get,rows)):
             if i%25==0:print(f'GTSinger audio {i+1}/{len(rows)}',flush=True)
     path=Path(a.output);path.parent.mkdir(parents=True,exist_ok=True)

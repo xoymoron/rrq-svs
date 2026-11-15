@@ -153,7 +153,7 @@ def evaluate(args,d,rows,device,oracle=False):
                 arms=make_arms(c['z'],c['codes'],prediction,codec.layers)
             atomic_save(dict(id=row['id'],codes=prediction.cpu(),origin='model_rollout',
                 model_sha256=checkpoint_hash,codec_sha256=codec.fingerprint,
-                conditioning='score_pitch_gt_phone_duration',decoding='greedy'),
+                conditioning=row.get('conditioning','score_pitch_gt_phone_duration'),decoding='greedy'),
                 root/'predictions'/(row['id']+'.pt'))
         result={}
         sf.write(folder/(row['id']+'-reference.wav'),x,codec.sample_rate,subtype='FLOAT')
@@ -175,7 +175,7 @@ def evaluate(args,d,rows,device,oracle=False):
     if d.primary:
         report=summary(samples)
         report.update(stage=stage,codec_sha256=codec.fingerprint,model_sha256=checkpoint_hash,
-            manifest_sha256=sha256(args.manifest),conditioning='score_pitch_gt_phone_duration',
+            manifest_sha256=sha256(args.manifest),conditioning=sorted({r.get('conditioning','score_pitch_gt_phone_duration') for r in selected}),
             note='Oracle accesses target audio; not learned RRQ performance nor a global upper bound.')
         write_json(root/(stage+'.json'),report)
         print(json.dumps(report['language_macro']),flush=True)
