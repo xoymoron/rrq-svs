@@ -42,7 +42,7 @@ def segment_units(notes,start,end):
     return units,durations,pitches
 
 
-def prepare(labels,audio_zips,output,singers,hours=1.5,max_segments=None):
+def prepare(labels,audio_zips,output,singers=None,hours=None,max_segments=None):
     output=Path(output);(output/'audio').mkdir(parents=True,exist_ok=True)
     annotations={}
     for path in labels:
@@ -60,7 +60,8 @@ def prepare(labels,audio_zips,output,singers,hours=1.5,max_segments=None):
                 filename=Path(member).name
                 if filename not in annotations:continue
                 singer=filename.split('_')[1]
-                if singer not in singers or used[singer]>=hours*3600:continue
+                if singers is not None and singer not in singers:continue
+                if hours is not None and used[singer]>=hours*3600:continue
                 if filename in found:raise ValueError('duplicate source waveform')
                 found.add(filename);label,label_path,label_member,split=annotations[filename]
                 info=z.getinfo(member)
@@ -88,7 +89,7 @@ def prepare(labels,audio_zips,output,singers,hours=1.5,max_segments=None):
                         source_crc32=info.CRC,source_label_archive=label_path,
                         source_label_member=label_member,start_sample=start_sample,stop_sample=stop))
                     used[singer]+=end-start
-                    if used[singer]>=hours*3600 or (max_segments and len(rows)>=max_segments):break
+                    if (hours is not None and used[singer]>=hours*3600) or (max_segments and len(rows)>=max_segments):break
                 if max_segments and len(rows)>=max_segments:break
         if max_segments and len(rows)>=max_segments:break
     if not rows:raise ValueError('no eligible selected-singer segments; inspect archives')
@@ -101,8 +102,8 @@ def prepare(labels,audio_zips,output,singers,hours=1.5,max_segments=None):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--labels',nargs='+',required=True);p.add_argument('--audio-zips',nargs='+',required=True)
-    p.add_argument('--output',required=True);p.add_argument('--singers',nargs='+',default=['16','18','36','38','52','60','71','79'])
-    p.add_argument('--hours',type=float,default=1.5);p.add_argument('--max-segments',type=int)
+    p.add_argument('--output',required=True);p.add_argument('--singers',nargs='+',default=None)
+    p.add_argument('--hours',type=float,default=None);p.add_argument('--max-segments',type=int)
     a=p.parse_args();prepare(a.labels,a.audio_zips,a.output,a.singers,a.hours,a.max_segments)
 
 

@@ -35,7 +35,7 @@ Install matching torch/torchaudio2.6.0 CUDA12.4, then:
 ~/SVS/.venv-toksing/bin/python -m pytest
 # In the svs-toksing diagnostic tmux window:
 cd ~/SVS/rrq-svs
-bash run_toksing.sh 2>&1 | tee ~/SVS/logs/toksing-diagnostic.log
+bash run_toksing.sh /path/to/reviewed-manifest.jsonl artifacts/new-experiment 2>&1 | tee ~/SVS/logs/toksing-diagnostic.log
 # Attach from another terminal:
 tmux attach -t svs-toksing
 ```
@@ -48,23 +48,45 @@ are tied to manifest and codec hashes. Cache also verifies audio/annotations.
 Train cache stores tokens; validation retains exact FP32 latents for oracle.
 F0/voicing/MRSTFT are diagnostics, not MOS or proof of intelligibility.
 
-The initial run reuses the existing small GTSinger subset. It is a bounded
-mechanism diagnostic, not the tens-hour multilingual experiment. Expand:
+The initial small-data mechanism diagnostic is complete. Its metrics are
+historical evidence, not a multilingual SVS quality claim. Acquisition now
+retains every original singing asset in all nine GTSinger languages, including
+WAV, JSON, TextGrid and MusicXML. Speech takes are excluded. There is no singer,
+duration or language cap at acquisition. Chinese minimization is a future
+training-sampling policy, not deletion from the source collection.
 
 ```bash
-~/SVS/.venv-toksing/bin/python -m rrq.toksing_acquire --root ~/SVS/data/gtsinger-pilot --output ~/SVS/data/toksing/gtsinger-expanded.jsonl --hours-per-singer 1.5
+~/SVS/.venv-toksing/bin/python -m rrq.toksing_acquire --root ~/SVS/data/gtsinger --output ~/SVS/data/toksing/gtsinger-full.jsonl --workers 8 --wandb
 ```
 
-Pinned GTSinger metadata supplies score and phoneme timing; eight non-Chinese
-languages retained, song-diverse selection capped by duration per singer.
-Title-group split is provisional: translation aliases and cross-corpus song
-identity need audit before final paper experiments.
+The pinned source tree, source sizes and available official LFS SHA256 hashes
+are checked. Existing verified raw files are reused. tqdm and W&B show verified
+files/bytes and failures; source-inventory.json and download-status.json are
+local records. Raw acquisition never depends on training annotation eligibility.
+The metadata manifest is an inventory, not a finalized training split.
+Title groups, translation aliases and cross-corpus song identity still need audit.
 
-AIHub preference is dataset473 (next-tone guide vocals):92 singers,157.39h
-singing,1.71h/person average, timed note/lyric/MIDI JSON. Select6-8 adult singers
-and balance hours with GTSinger. Note timestamps are NOT phoneme alignments.
-Download requires approved account/API access. Neither AIHub corpus is marked
-acquired until server files and annotation coverage are actually inspected.
+AIHub dataset473 (next-tone guide vocals) acquisition covers all four accessible
+archives TL1/TS1/VL1/VS1 (file keys34217-34220). The portal reports92 singers and
+157.39h; the actual accessible labels contain3609 recordings and141.87h of
+voice_duration. Do not substitute the advertised number for the measured one.
+Note timestamps are NOT phoneme alignments. Breath flags override placeholder
+MIDI96/84. Overlapping annotation segments are reported, not silently repaired.
+The preprocessor defaults to all singers with no duration cap; segmentation and
+annotation quality checks are separate from preservation of all source archives.
+
+rrq.acquisition_watch observes the official AIHub downloader PID, publishes byte
+growth/rounded-size progress to tqdm and W&B, then checks all ZIP CRCs and
+label/audio filename coverage after download/merging exits. A size estimate or
+an existing ZIP filename alone never counts as successful acquisition.
+
+Implementation status: frozen DAC, score predictor, DDP diagnostic training,
+reconstruction and actual-predicted-prefix RRQ oracle work. The new backbone's
+learned exposure/RRQ training arms are not yet connected to the runner; final
+multilingual preprocessing/splits and matched training remain future work.
+The earlier50-phrase diagnostic gave language-macro MRSTFT-SC0.9772 for original
+suffix vs0.3376 for RRQ oracle suffix. First-codebook prediction accuracy was
+only3.3%; this is a weak-model mechanism test, not evidence of learned RRQ gains.
 
 ## Migration review and history
 
