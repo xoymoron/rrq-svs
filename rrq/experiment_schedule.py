@@ -1,6 +1,7 @@
 """Resumable two-GPU experiment pipeline. Run inside tmux; all output is mirrored."""
 import argparse
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
@@ -10,8 +11,17 @@ import time
 from .experiment import ARMS, SEEDS, atomic_json
 
 
+def command_for(root,device,module,arguments,world=1):
+    prefix=[sys.executable,'-u','-m',module]
+    if module=='rrq.experiment' and arguments[0]=='train' and world>1:
+        prefix=[sys.executable,'-u','-m','torch.distributed.run','--standalone','--nnodes=1',
+                f'--nproc-per-node={world}','--module',module]
+    return [*prefix,'--root',str(root),'--device',f'cuda:{device}',*arguments]
+
+
 def execute(root,device,module,arguments,label):
-    command=[sys.executable,'-u','-m',module,'--root',str(root),'--device',f'cuda:{device}',*arguments]
+    world=json.loads((root/'protocol.json').read_text()).get('world_size',1)
+    command=command_for(root,device,module,arguments,world)
     logs=root/'logs'; logs.mkdir(exist_ok=True)
     print('START',label,'GPU',device,flush=True)
     with (logs/(label+'.log')).open('a',encoding='utf-8') as stream:
@@ -43,16 +53,20 @@ def main():
     try:
         stage('common multilingual adaptation')
         if not (root/'warmup/complete.json').exists(): execute(root,0,'rrq.experiment',['train','--stage','warmup'],'common')
-        stage('full common rollouts and initial validation renders')
-        batches(root,[('rrq.experiment',['targets'],'targets'),
+        stage('validation common rollouts and initial renders')
+        batches(root,[('rrq.experiment',['targets','--split','valid'],'targets-valid'),
                       ('rrq.experiment',['render','--variant','initial','--split','valid'],'initial-valid')])
         execute(root,0,'rrq.experiment',['render','--variant','common','--split','valid'],'common-valid')
         stage('multilingual validation audio and ASR assessment')
         execute(root,0,'rrq.experiment_metrics',['--asr',str(args.asr),'--split','valid','--labels','initial','common'],'valid-metrics')
+        stage('full common rollout target cache')
+        execute(root,0,'rrq.experiment',['targets'],'targets')
         stage('matched branches: 3 arms x 3 seeds x 6 epochs')
         jobs=[('rrq.experiment',['train','--stage','branch','--arm',arm,'--seed',str(seed)],f'train-{arm}-{seed}')
               for seed in SEEDS for arm in ARMS]
-        batches(root,jobs)
+        if json.loads((root/'protocol.json').read_text()).get('world_size',1)>1:
+            for module,arguments,label in jobs: execute(root,0,module,arguments,label)
+        else: batches(root,jobs)
         stage('full held-out test generation')
         jobs=[('rrq.experiment',['render','--variant','common','--split','test'],'common-test')]
         jobs += [('rrq.experiment',['render','--variant',arm,'--seed',str(seed),'--split','test'],f'test-{arm}-{seed}')

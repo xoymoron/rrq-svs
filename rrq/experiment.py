@@ -1,5 +1,6 @@
 """Matched, fixed-budget multilingual SVS experiments, separate from smoke tools."""
 import argparse
+from contextlib import nullcontext
 from collections import defaultdict
 import hashlib
 import json
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 from torch.nn import functional as F
+from .distributed import Distributed, global_batches, validation_result
 
 from .cached_ar import generate_batch
 from .core import requantize
@@ -92,6 +94,8 @@ def init(args):
     cfg=dict(schema=1,bundle=str(args.bundle.resolve()),assets=str(args.assets.resolve()),prompt=str(args.prompt.resolve()),
         cache=str(args.cache.resolve()),seed=17,seeds=list(SEEDS),warmup_epochs=8,branch_epochs=6,
         backbone_lr=2e-5,embedding_lr=1e-3,weight_decay=.01,grad_clip=1.,rho=.5,
+        world_size=getattr(args,'world_size',1),global_batch_size=getattr(args,'world_size',1),
+        loss_normalization='mean of per-phrase mean token CE across ranks',
         primary_sha256=sha256(args.bundle/'primary.jsonl'),vocab_sha256=sha256(args.bundle/'vocabulary.json'),
         prompt_sha256=sha256(args.prompt),base_sha256=sha256(args.assets/ACOUSTIC),
         codec_sha256=sha256(args.assets/'codec/ckpt_01135000.pth'),
@@ -177,7 +181,7 @@ class Experiment:
         if optimizer is not None: data['optimizer']=optimizer.state_dict()
         path=Path(path); tmp=path.with_suffix('.tmp'); torch.save(data,tmp); tmp.replace(path)
 
-    def loss(self,row,codes=None,suffix=False,shuffle=False):
+    def loss(self,row,codes=None,suffix=False,shuffle=False,model=None):
         if codes is None and not shuffle: tokens,mask,start=self.packed[row['id']]
         else:
             altered=dict(row)
@@ -187,33 +191,40 @@ class Experiment:
         if suffix: mask[start::3]=False
         tokens=tokens[None].to(self.device); mask=mask[None].to(self.device)
         with torch.autocast('cuda',dtype=torch.bfloat16):
-            logits,_=self.model(tokens,target_acoustic_mask=mask,text_feature=self.prompt)
+            logits,_=(self.model if model is None else model)(tokens,target_acoustic_mask=mask,text_feature=self.prompt)
             loss=F.cross_entropy(logits[mask].float(),tokens[mask])
         if not torch.isfinite(loss): raise ValueError('nonfinite loss')
         return loss
 
     @torch.no_grad()
-    def validate(self,shuffle=False,suffix=False):
+    def validate(self,shuffle=False,suffix=False,context=None):
+        context=context or Distributed()
         values=[]
-        for row in self.split('valid'):
+        rows=self.split('valid')
+        for row in rows[context.rank::context.world]:
             values.append(dict(id=row['id'],language=row['language'],singer=row['singer'],ce=float(self.loss(row,suffix=suffix))))
             if shuffle: values[-1]['reversed_phone_ce']=float(self.loss(row,suffix=suffix,shuffle=True))
-        grouped=defaultdict(list)
-        for v in values: grouped[v['language']].append(v['ce'])
-        means={k:float(np.mean(v)) for k,v in grouped.items()}
-        return dict(language_macro_ce=float(np.mean(list(means.values()))),per_language=means,samples=values)
+        return validation_result(context.gather(values),[r['id'] for r in rows])
 
 
 def train(args):
     from .tracking import Tracker
     label = 'warmup' if args.stage == 'warmup' else f'{args.arm}-{args.seed}'
-    with Tracker(args.root, label) as tracker:
-        return tracked_train(args, tracker)
+    context=Distributed(); context.start()
+    if context.world>1: args.device=f'cuda:{context.local_rank}'
+    try:
+        with Tracker(args.root, label) as tracker:
+            return tracked_train(args, tracker, context)
+    finally:
+        context.close()
 
 
-def tracked_train(args, tracker):
+def tracked_train(args, tracker, context):
+    from tqdm.auto import tqdm
     from .tracking import validation_metrics
     ex=Experiment(args.root,args.device); cfg=ex.cfg
+    if cfg.get('world_size',1)!=context.world: raise ValueError('world size differs from locked protocol')
+    global_batches(ex.split('train'),context.world)
     warm=args.stage=='warmup'; seed=17 if warm else args.seed
     torch.manual_seed(seed)
     out=args.root/('warmup' if warm else f'{args.arm}-{seed}'); out.mkdir(exist_ok=True)
@@ -236,11 +247,14 @@ def tracked_train(args, tracker):
     start_epoch=1; best=float('inf')
     if (out/'last.pt').exists():
         last=ex.load(out/'last.pt'); optimizer.load_state_dict(last['optimizer']); start_epoch=last['epoch']+1; metrics=last['metrics']
-        if warm: best=recover_best(out,ex.protocol_hash,last)
+        if warm: best=context.gather([recover_best(out,ex.protocol_hash,last) if context.primary else None])[0]
     elif warm:
-        initial=ex.validate(shuffle=True)
-        atomic_json(out/'initial-validation.json',initial)
+        initial=ex.validate(shuffle=True,context=context)
+        if context.primary: atomic_json(out/'initial-validation.json',initial)
         tracker.log(validation_metrics(initial, 'initial_validation'))
+    training_model=context.wrap(ex.model)
+    initial_hash=context.assert_synced(ex.model)
+    tracker.summary({'world_size':context.world,'initial_parameter_sha256':initial_hash,'global_batch_size':context.world})
     epochs=cfg['warmup_epochs'] if warm else cfg['branch_epochs']
     cache={}
     if not warm:
@@ -255,51 +269,73 @@ def tracked_train(args, tracker):
     total=time.monotonic()
     for epoch in range(start_epoch,epochs+1):
         schedule=epoch_rows(ex.split('train'),seed,epoch)
+        batches=global_batches(schedule,context.world)
         losses=[]; replacements=0; epoch_time=time.monotonic()
         log=out/f'epoch-{epoch:02d}.jsonl'
-        with log.open('w',encoding='utf-8') as stream:
-            for step,row in enumerate(schedule,1):
+        with (log.open('w',encoding='utf-8') if context.primary else nullcontext()) as stream:
+            progress=tqdm(batches,desc=f'{out.name} epoch {epoch}/{epochs}',disable=not context.primary,
+                          mininterval=2.,ncols=110,ascii=True)
+            for step,batch in enumerate(progress,1):
+                row=batch[context.rank]
                 replacement=mixture(seed,epoch,row['id'],cfg['rho'])
                 codes=None if warm else arm_codes(*cache[row['id']],args.arm,replacement)
                 optimizer.zero_grad(set_to_none=True)
-                loss=ex.loss(row,codes,suffix=not warm); loss.backward()
+                loss=ex.loss(row,codes,suffix=not warm,model=training_model); loss.backward()
                 norm=torch.nn.utils.clip_grad_norm_([p for p in ex.model.parameters() if p.requires_grad],cfg['grad_clip'])
                 if not torch.isfinite(norm): raise ValueError('nonfinite gradient')
                 optimizer.step()
                 if not torch.equal(original_rows,ex.model.global_model.transformer.wte.weight[:ex.old]): raise RuntimeError('original input embedding rows changed')
-                item=dict(epoch=epoch,step=step,id=row['id'],language=row['language'],loss=float(loss.detach()),grad_norm=float(norm),mixture_draw=replacement)
-                stream.write(json.dumps(item)+'\n'); stream.flush(); losses.append(item['loss']); replacements+=replacement
-                tracker.log({'train/global_step': (epoch-1)*len(schedule)+step, 'train/epoch': epoch,
+                samples=context.gather([dict(id=row['id'],language=row['language'],loss=float(loss.detach()),
+                    mixture_draw=replacement,rank=context.rank,
+                    gpu_peak_allocated_gib=torch.cuda.max_memory_allocated(ex.device)/2**30)])
+                item=dict(epoch=epoch,step=step,samples=samples,loss=float(np.mean([r['loss'] for r in samples])),
+                          grad_norm=float(norm),world_size=context.world)
+                losses.extend(r['loss'] for r in samples); replacements+=sum(r['mixture_draw'] for r in samples)
+                if context.primary:
+                    stream.write(json.dumps(item)+'\n'); stream.flush()
+                    progress.set_postfix(loss=f'{item["loss"]:.3f}',mean=f'{np.mean(losses):.3f}',refresh=False)
+                if step==1:
+                    synced=context.assert_synced(ex.model)
+                    tracker.summary({'last_verified_parameter_sha256':synced,'ddp_parameters_equal':True})
+                tracker.log({'train/global_step': (epoch-1)*len(batches)+step, 'train/epoch': epoch,
                     'train/loss': item['loss'], 'train/grad_norm_before_clip': item['grad_norm'],
-                    'train/mixture_draw': int(replacement), 'train/uses_predicted_prefix': int(not warm and args.arm!='baseline' and replacement),
+                    'train/mixture_fraction': sum(r['mixture_draw'] for r in samples)/context.world,
+                    'train/uses_predicted_prefix_fraction': sum(r['mixture_draw'] for r in samples)/context.world if not warm and args.arm!='baseline' else 0.,
                     'train/lr_backbone': cfg['backbone_lr'], 'train/lr_new_embedding': cfg['embedding_lr'] if warm else 0.,
                     'train/mean_ce_so_far': float(np.mean(losses)),
                     'train/elapsed_seconds': time.monotonic()-total,
-                    'train/gpu_peak_allocated_gib': torch.cuda.max_memory_allocated(ex.device)/2**30 if str(ex.device).startswith('cuda') else 0.})
-                if step%20==0 or step==len(schedule):
+                    **{f'train/rank_{r["rank"]}/peak_allocated_gib':r['gpu_peak_allocated_gib'] for r in samples}})
+                if context.primary and (step%20==0 or step==len(batches)):
                     status=dict(stage=args.stage,arm=args.arm if not warm else 'common',seed=seed,epoch=epoch,epochs=epochs,
-                        step=step,steps=len(schedule),mean_train_ce=float(np.mean(losses)),elapsed_seconds=time.monotonic()-epoch_time)
-                    atomic_json(out/'status.json',status); print(json.dumps(status),flush=True)
-        metrics=ex.validate(suffix=not warm)
+                        step=step,steps=len(batches),world_size=context.world,global_batch_size=context.world,
+                        samples_seen=len(losses),mean_train_ce=float(np.mean(losses)),elapsed_seconds=time.monotonic()-epoch_time)
+                    atomic_json(out/'status.json',status)
+        metrics=ex.validate(suffix=not warm,context=context)
+        synced=context.assert_synced(ex.model)
         metrics.update(epoch=epoch,train_ce=float(np.mean(losses)),schedule_sha256=hashlib.sha256('\n'.join(r['id'] for r in schedule).encode()).hexdigest(),
-                       mixture_draws=replacements,seconds=time.monotonic()-epoch_time)
-        atomic_json(out/f'validation-{epoch:02d}.json',metrics)
+                       mixture_draws=replacements,seconds=time.monotonic()-epoch_time,
+                       world_size=context.world,optimizer_steps=len(batches),samples_seen=len(losses),parameter_sha256=synced)
+        if context.primary: atomic_json(out/f'validation-{epoch:02d}.json',metrics)
         tracker.log(validation_metrics(metrics))
         tracker.summary({'last_epoch': epoch, 'schedule_sha256': metrics['schedule_sha256']})
-        ex.save(out/'last.pt',save_names,epoch,metrics,optimizer)
+        if context.primary: ex.save(out/'last.pt',save_names,epoch,metrics,optimizer)
         if warm and metrics['language_macro_ce']<best:
-            best=metrics['language_macro_ce']; ex.save(out/'best.pt',save_names,epoch,metrics)
-            atomic_json(out/'best.json',dict(epoch=epoch,value=best))
-        print('EPOCH_DONE',json.dumps({k:v for k,v in metrics.items() if k not in ('samples','per_language')}),flush=True)
+            best=metrics['language_macro_ce']
+            if context.primary:
+                ex.save(out/'best.pt',save_names,epoch,metrics)
+                atomic_json(out/'best.json',dict(epoch=epoch,value=best))
+        context.barrier()
+        if context.primary: print('EPOCH_DONE',json.dumps({k:v for k,v in metrics.items() if k not in ('samples','per_language')}),flush=True)
     if warm:
-        ex.load(out/'best.pt'); selected=ex.validate(shuffle=True)
-        atomic_json(out/'selected-validation.json',selected)
+        ex.load(out/'best.pt'); selected=ex.validate(shuffle=True,context=context)
+        if context.primary: atomic_json(out/'selected-validation.json',selected)
         tracker.log(validation_metrics(selected, 'selected_validation'))
         tracker.summary({'selected_checkpoint': 'best.pt', 'best_validation_ce': best})
-    else: ex.save(out/'final.pt',save_names,epochs,metrics)
-    atomic_json(out/'complete.json',dict(stage=args.stage,epochs=epochs,seed=seed,trainable_names=names,protocol_sha256=ex.protocol_hash,
+    elif context.primary: ex.save(out/'final.pt',save_names,epochs,metrics)
+    if context.primary: atomic_json(out/'complete.json',dict(stage=args.stage,epochs=epochs,seed=seed,trainable_names=names,protocol_sha256=ex.protocol_hash,
         common_sha256=None if warm else index['common_sha256'],seconds=time.monotonic()-total))
-    print('TRAIN_COMPLETE',str(out),flush=True)
+    context.barrier()
+    if context.primary: print('TRAIN_COMPLETE',str(out),flush=True)
 
 
 def trainable_names_from_checkpoint(path):
@@ -432,6 +468,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__); p.add_argument('--root',type=Path,required=True); p.add_argument('--device',default='cuda:0')
     sub=p.add_subparsers(dest='command',required=True)
     q=sub.add_parser('init')
+    q.add_argument('--world-size',type=int,choices=[1,2],default=1)
     for name in ('bundle','assets','prompt','cache'): q.add_argument('--'+name,type=Path,required=True)
     q=sub.add_parser('revise-sampling'); q.add_argument('--from-root',type=Path,required=True)
     q=sub.add_parser('train'); q.add_argument('--stage',choices=['warmup','branch'],required=True)

@@ -54,7 +54,7 @@ class Tracker:
 
     def __enter__(self):
         project = os.environ.get('WANDB_PROJECT')
-        if not project:
+        if not project or int(os.environ.get('RANK',0)) != 0:
             return self
         import wandb
         raw = (self.root / 'protocol.json').read_bytes()

@@ -551,3 +551,22 @@ training global_step values can repeat (local final epoch JSON is canonical).
 adapter and optimizer states are not reused. Cached dataset/codec preprocessing is
 reused unchanged. Logging alone does not repair the poor multilingual quality found
 in v2; that remains a limitation of the experiment.
+
+### Two-GPU DDP runs
+
+Initialize a **new** experiment with `rrq.experiment ... init --world-size 2`.
+The scheduler reads the locked world size and launches each warmup/branch job with
+`torch.distributed.run --standalone --nproc-per-node=2`. Both GPUs train the same
+model; branch jobs run sequentially, not as unrelated single-GPU jobs.
+Each rank consumes one variable-length phrase without padding. DDP averages their
+per-phrase mean token losses: effective batch 2, 236 optimizer steps per 472-phrase
+epoch. Epoch counts and learning rates stay fixed; previous batch-1 curves are not
+numerically equivalent controls. Every arm in the new protocol uses identical pairs.
+A nondivisible training set fails rather than duplicating/dropping samples.
+Validation is sharded and exact coverage is checked before language-macro reduction.
+Only rank 0 logs W&B/checkpoints and displays epoch tqdm; both ranks verify identical
+trainable parameter SHA256 after the first optimizer update and each epoch.
+`epoch-XX.jsonl` now has one row per optimizer step and a `samples` list containing
+each rank's phrase ID, loss, language, mixture draw, and peak allocated GPU memory.
+Validation generation/ASR now runs before the full training target cache, so poor
+multilingual pronunciation is visible earlier; loss reduction is not a quality gate.
