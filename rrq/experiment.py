@@ -132,7 +132,12 @@ def common_quality_gate(initial,best,config):
     positive=[lang for lang,m in best['diagnostics'].items() if
               m['phone_reverse_ce_gap']>config['gate_min_condition_gap'] and
               m['note_shift_ce_gap']>config['gate_min_condition_gap']]
-    passed=after<before*config['gate_relative_sc'] and len(positive)>=config['gate_min_languages']
+    # For a nonzero reference, zero-output spectral convergence is 1. A random
+    # model may be much worse; merely approaching silence must not unlock RRQ.
+    reference=min(before,1.)
+    required=reference*config['gate_relative_sc']
+    passed=after<required and len(positive)>=config['gate_min_languages']
     return dict(passed=passed,initial_sc=before,best_sc=after,ratio=after/max(before,1e-12),
+                silence_sc=1.,required_sc_below=required,
                 positive_condition_languages=positive,
                 note='Predeclared operational feasibility checks, not proof of intelligibility or statistical significance.')

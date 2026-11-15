@@ -73,3 +73,12 @@ def test_feasibility_gate_requires_generation_and_both_conditions():
     assert not common_quality_gate(initial,best,cfg)['passed']
     best['diagnostics']['English']['note_shift_ce_gap']=.01
     assert common_quality_gate(initial,best,cfg)['passed']
+
+
+def test_common_gate_does_not_accept_silence_as_improvement_over_random_audio():
+    from rrq.experiment import common_quality_gate
+    cfg=dict(selection_metric='sc',gate_min_condition_gap=.001,gate_relative_sc=.9,gate_min_languages=1)
+    initial={'language_macro':{'generated':{'sc':3.}}}
+    best=dict(language_macro={'generated':{'sc':1.}},diagnostics={
+        'English':{'phone_reverse_ce_gap':.01,'note_shift_ce_gap':.01}})
+    assert not common_quality_gate(initial,best,cfg)['passed']

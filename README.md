@@ -70,8 +70,9 @@ and fixed audio examples are logged. These are diagnostics, not MOS or proof
 of lyric intelligibility. Final evaluation uses the full held-out split and
 paired song-family bootstrap; one-seed CI does not represent seed variability.
 
-Before branch training, operational gates require common-model generation and
-condition-use improvement, then matched oracle room on the validation panel.
+Before branch training, operational gates require common-model SC to improve
+by 10% over both the initial model and a zero-output baseline (SC=1), with
+phone/note condition-use gaps, then matched oracle room on the validation panel.
 Thresholds are predeclared heuristics, not statistical/perceptual certificates.
 If either fails, stop and review rather than automatically lengthening training.
 Seeds 29/43 are planned replications after seed 17 feasibility, not completed runs.
